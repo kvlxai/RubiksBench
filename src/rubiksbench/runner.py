@@ -1,21 +1,23 @@
-"""Run a benchmark: generate serially, evaluate every image, score per model."""
+"""Run a benchmark: take images from the library or generate them serially, evaluate each, score per model."""
 
 import random
 import re
 import shutil
 import sys
 import time
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from . import EVALUATOR_VERSION, __version__
-from .backends import GenerationRequest, get_backend
+from .backends import ImageBackend, get_backend
 from .backends.base import utc_now
 from .config import BenchmarkConfig
 from .evaluation.evaluator import evaluate_extraction
 from .evaluation.report import write_results
 from .evaluation.scoring import score_run
+from .storage.library import ImageLibrary
 from .storage.results import RunStore
 from .vision.extractor import Extractor
 
@@ -24,19 +26,43 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def _seeds(config: BenchmarkConfig) -> list[int]:
-    if config.seed is not None:
-        return [config.seed + i for i in range(config.iterations)]
+def _seeds(first: int | None, count: int) -> list[int]:
+    if first is not None:
+        return [first + i for i in range(count)]
     rng = random.SystemRandom()
-    return [rng.randrange(1, 2**31) for _ in range(config.iterations)]
+    return [rng.randrange(1, 2**31) for _ in range(count)]
 
 
 def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-async def generate_run(config: BenchmarkConfig, store: RunStore, extractor: Extractor) -> None:
-    """Generate every image one request at a time, model by model, scoring each as it arrives."""
+class _Backends:
+    """Backends opened on first use, so a run that only reuses library images needs no API keys."""
+
+    def __init__(self, stack: AsyncExitStack):
+        self._stack = stack
+        self._open: dict[str, ImageBackend] = {}
+
+    async def get(self, name: str) -> ImageBackend:
+        if name not in self._open:
+            self._open[name] = await self._stack.enter_async_context(get_backend(name))
+        return self._open[name]
+
+
+def _reusable(pool: list[dict[str, Any]], seed: int, fixed_seed: bool) -> dict[str, Any] | None:
+    """Take a library image for this sample: the same seed when seeds are fixed, else the oldest unused."""
+    for i, record in enumerate(pool):
+        if not fixed_seed or record["request"]["seed"] == seed:
+            return pool.pop(i)
+    return None
+
+
+async def generate_run(config: BenchmarkConfig, store: RunStore, extractor: Extractor, library: ImageLibrary) -> None:
+    """Fill every model's samples from the image library, generating (serially) only what is missing.
+
+    Every new image goes into the library too, for later runs with the same settings.
+    """
     store.write_config(
         {
             "benchmark_version": __version__,
@@ -45,56 +71,75 @@ async def generate_run(config: BenchmarkConfig, store: RunStore, extractor: Extr
             "config": config.as_dict(),
         }
     )
-    async with get_backend(config.backend) as backend:
+    async with AsyncExitStack() as stack:
+        backends = _Backends(stack)
         for name, model in config.models.items():
-            for index, seed in enumerate(_seeds(config)):
-                request = GenerationRequest(
-                    model=model,
-                    prompt=config.prompt,
-                    seed=seed,
-                    width=config.width,
-                    height=config.height,
-                    negative_prompt=config.negative_prompt,
-                    steps=config.steps,
-                    guidance=config.guidance,
-                    extra=config.extra,
-                )
-                result = await backend.generate(request)
+            first = config.first_seed(model)
+            pool = library.images(model.backend, config.request(model))
+            for index, seed in enumerate(_seeds(first, config.iterations)):
                 sample_id = f"{_slug(name)}__{index:04d}"
-                record = store.add_generation(sample_id, result, model_name=name, iteration=index)
+                fields = {"model_name": name, "iteration": index}
+                if (found := _reusable(pool, seed, first is not None)) is not None:
+                    record = store.add_image(sample_id, found, library.root / found["image_path"], **fields,
+                                             reused_from=found["image_path"])
+                    status = format_status(evaluate_sample(store, record, extractor))
+                    _log(f"[{name}] {index + 1}/{config.iterations} seed={found['request']['seed']} "
+                         f"from the library {status}")
+                    continue
+                backend = await backends.get(model.backend)
+                result = await backend.generate(config.request(model, seed))
                 if result.ok:
+                    record = library.add(result)
+                    record = store.add_image(sample_id, record, library.root / record["image_path"], **fields)
                     status = format_status(evaluate_sample(store, record, extractor))
                 else:
+                    store.add_generation(sample_id, result, **fields)
                     status = f"GENERATION FAILED {result.error.code}: {result.error.message}"
                 _log(f"[{name}] {index + 1}/{config.iterations} seed={seed} {result.latency_s:.1f}s {status}")
 
 
-async def backfill_run(store: RunStore, extractor: Extractor) -> int:
-    """Resend every failed request of a run with its original settings, and score the results.
+async def backfill(config: BenchmarkConfig, library: ImageLibrary) -> tuple[int, int]:
+    """Generate what the library lacks for a benchmark: ``iterations`` images per model.
 
-    The new record replaces the failure for scoring but keeps its own timestamp and
-    a ``backfill_of`` entry with the original attempt, so nothing is hidden.
+    With fixed seeds the missing seeds are generated, else any missing count with
+    random seeds. Each missing image is requested once; a failure is logged and
+    left for the next backfill. Returns (generated, failed).
     """
-    run = store.read_config()
-    failed = [g for g in store.generations() if g.get("error")]
-    if not failed:
-        return 0
-    async with get_backend(run["config"]["backend"]) as backend:
-        for record in failed:
-            request = GenerationRequest(**record["request"])
-            result = await backend.generate(request)
-            new = store.add_generation(
-                record["sample_id"], result, model_name=record["model_name"], iteration=record["iteration"],
-                backfill_of={"started_at": record["started_at"], "error": record["error"]},
-            )
-            if result.ok:
-                evaluation = evaluate_sample(store, new, extractor)
-                status = evaluation["verdict"]
+    generated = failed = 0
+    async with AsyncExitStack() as stack:
+        backends = _Backends(stack)
+        for name, model in config.models.items():
+            first = config.first_seed(model)
+            stored = library.images(model.backend, config.request(model))
+            if first is not None:
+                have = {r["request"]["seed"] for r in stored}
+                missing = [s for s in _seeds(first, config.iterations) if s not in have]
             else:
-                status = f"GENERATION FAILED {result.error.code}: {result.error.message}"
-            _log(f"[{record['model_name']}] backfill #{record['iteration']} seed={request.seed} "
-                 f"{result.latency_s:.1f}s {status}")
-    return len(failed)
+                missing = _seeds(None, max(0, config.iterations - len(stored)))
+            if not missing:
+                _log(f"[{name}] {len(stored)} images in the library, none missing")
+                continue
+            backend = await backends.get(model.backend)
+            for done, seed in enumerate(missing, 1):
+                result = await backend.generate(config.request(model, seed))
+                if result.ok:
+                    library.add(result)
+                    generated += 1
+                    status = "stored"
+                else:
+                    failed += 1
+                    status = f"GENERATION FAILED {result.error.code}: {result.error.message}"
+                _log(f"[{name}] {done}/{len(missing)} missing, seed={seed} {result.latency_s:.1f}s {status}")
+    return generated, failed
+
+
+def import_run(store: RunStore, library: ImageLibrary) -> int:
+    """Copy a run's generated images into the library (once each), so later runs can reuse them."""
+    added = 0
+    for record in store.generations():
+        if record.get("image_path") and not record.get("error"):
+            added += library.add_record(record, store.root / record["image_path"])[1]
+    return added
 
 
 def format_status(evaluation: dict[str, Any]) -> str:

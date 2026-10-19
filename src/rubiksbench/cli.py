@@ -3,7 +3,9 @@
     rubiksbench validate observation.json
     rubiksbench validate-image cube.png
     rubiksbench models "Flux 3"
-    rubiksbench run configs/benchmark_runware.toml
+    rubiksbench backfill configs/benchmark.toml
+    rubiksbench run configs/benchmark.toml
+    rubiksbench library import runs/<run>
     rubiksbench score runs/<run>
     rubiksbench site runs/<run> site/ --url https://example.github.io/RubiksBench/ --share-image <sample>
 """
@@ -22,7 +24,10 @@ from .evaluation.evaluator import evaluate_extraction, validate
 from .evaluation.rubric import CHECKS, FAIL
 from .evaluation.scoring import format_table
 from .site import build_site
-from .runner import backfill_run, evaluate_run, format_status, generate_run, import_references, new_run_dir, report_run
+from .runner import (
+    backfill, evaluate_run, format_status, generate_run, import_references, import_run, new_run_dir, report_run,
+)
+from .storage.library import ImageLibrary
 from .storage.results import RunStore
 from .vision.extractor import EXTRACTORS
 
@@ -86,7 +91,7 @@ def _run(args: argparse.Namespace) -> int:
     print(f"run directory: {store.root}", file=sys.stderr)
     extractor = EXTRACTORS[args.extractor or config.extractor]()
     try:
-        asyncio.run(generate_run(config, store, extractor))
+        asyncio.run(generate_run(config, store, extractor, ImageLibrary(Path(config.library))))
     except KeyboardInterrupt:
         print("\ninterrupted: reporting the images generated so far", file=sys.stderr)
     if config.references:
@@ -94,11 +99,12 @@ def _run(args: argparse.Namespace) -> int:
     return _report(*report_run(store))
 
 
-def _backfill(store: RunStore, extractor: str | None) -> int:
-    name = extractor or store.read_config().get("config", {}).get("extractor", "vision")
-    count = asyncio.run(backfill_run(store, EXTRACTORS[name]()))
-    print(f"resent {count} failed request(s)", file=sys.stderr)
-    return _report(*report_run(store))
+def _backfill(args: argparse.Namespace) -> int:
+    config = BenchmarkConfig.load(Path(args.config))
+    generated, failed = asyncio.run(backfill(config, ImageLibrary(Path(config.library))))
+    print(f"generated {generated} image(s) into {Path(config.library)}"
+          + (f"; {failed} failed, backfill again to retry them" if failed else ""), file=sys.stderr)
+    return 1 if failed else 0
 
 
 def _score(store: RunStore, extractor: str | None, references: str | None = None) -> int:
@@ -107,6 +113,22 @@ def _score(store: RunStore, extractor: str | None, references: str | None = None
     name = extractor or config.get("extractor", "vision")
     directory = references or config.get("references")
     return _report(*evaluate_run(store, EXTRACTORS[name](), Path(directory) if directory else None))
+
+
+def _library_import(args: argparse.Namespace) -> int:
+    library = ImageLibrary(Path(args.library))
+    for run_dir in args.run_dirs:
+        print(f"{run_dir}: {import_run(RunStore(Path(run_dir)), library)} new image(s)")
+    return 0
+
+
+def _library_list(args: argparse.Namespace) -> int:
+    for entry, count in ImageLibrary(Path(args.library)).entries():
+        others = {k: v for k, v in entry.items()
+                  if k not in ("backend", "model", "prompt", "width", "height") and v not in (None, {})}
+        settings = " ".join([f"{entry['width']}x{entry['height']}", *(f"{k}={v}" for k, v in others.items())])
+        print(f"{count:4d}  {entry['backend']}  {entry['model']}  {settings}  “{entry['prompt']}”")
+    return 0
 
 
 def _report(scores: dict[str, Any], paths: dict[str, Path]) -> int:
@@ -140,17 +162,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="print full model records as JSON")
     p.set_defaults(func=lambda a: asyncio.run(_models(a)))
 
-    p = sub.add_parser("run", help="generate images for every model in a benchmark TOML, then score them")
-    p.add_argument("config", help="benchmark TOML file, e.g. configs/benchmark_runware.toml")
+    p = sub.add_parser("run", help="score every model in a benchmark TOML, generating the images the library lacks")
+    p.add_argument("config", help="benchmark TOML file, e.g. configs/benchmark.toml")
     p.add_argument("--out", default="runs", help="parent directory for run directories")
     p.add_argument("--run-dir", help="explicit run directory (default: runs/<timestamp>-<config name>)")
     p.add_argument("--extractor", choices=sorted(EXTRACTORS), help="override the TOML's extractor")
     p.set_defaults(func=_run)
 
-    p = sub.add_parser("backfill", help="resend a run's failed requests with their original settings, then report")
-    p.add_argument("run_dir")
-    p.add_argument("--extractor", choices=sorted(EXTRACTORS), help="override the run's extractor")
-    p.set_defaults(func=lambda a: _backfill(RunStore(Path(a.run_dir)), a.extractor))
+    p = sub.add_parser("backfill", help="generate the images a benchmark's models lack in the library, without scoring")
+    p.add_argument("config", help="benchmark TOML file, e.g. configs/benchmark.toml")
+    p.set_defaults(func=_backfill)
+
+    p = sub.add_parser("library", help="the image library that runs reuse: list it, or import earlier runs")
+    library = p.add_subparsers(dest="library_command", required=True)
+    q = library.add_parser("list", help="every group of images with the same settings, and its size")
+    q.add_argument("--library", default="library")
+    q.set_defaults(func=_library_list)
+    q = library.add_parser("import", help="add the images of earlier run directories to the library")
+    q.add_argument("run_dirs", nargs="+")
+    q.add_argument("--library", default="library")
+    q.set_defaults(func=_library_import)
 
     p = sub.add_parser("score", help="re-evaluate and re-score an existing run directory")
     p.add_argument("run_dir")

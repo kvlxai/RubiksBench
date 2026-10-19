@@ -161,6 +161,28 @@ def test_fal_unknown_endpoint_is_a_recorded_failure():
     assert not result.ok and result.error.code == "unknownModel"
 
 
+def test_fal_schema_is_fetched_without_the_key_when_the_key_gets_an_error():
+    import httpx
+
+    openapi = {"paths": {"/fal-ai/x": {"post": {"requestBody": {"content": {"application/json": {
+        "schema": {"$ref": "#/components/schemas/Input"}}}}}}},
+        "components": {"schemas": {"Input": {"properties": {"prompt": {}, "seed": {}}}}}}
+    seen = []
+
+    def respond(request):
+        keyed = "authorization" in request.headers
+        seen.append(keyed)
+        error = {"error": {"code": "expansion_failed", "message": "Failed to fetch OpenAPI schema"}}
+        return httpx.Response(200, json={"models": [{"openapi": error if keyed else openapi}]})
+
+    async def properties():
+        backend = get_backend("fal", key="test")
+        backend._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        return await backend._properties("fal-ai/x")
+
+    assert set(asyncio.run(properties())) == {"prompt", "seed"} and seen == [True, False]
+
+
 IDEOGRAM_SIZES = (
     "Unsupported use of width/height parameters. Supported values are: '2048x2048', '1440x2880', "
     "'2880x1440', '1664x2496', '2496x1664'."

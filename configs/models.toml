@@ -1,0 +1,59 @@
+# Every model a benchmark can pick, per provider: name = "model id", or a table with settings:
+#
+#   [fal."Some Model"]
+#   id = "fal-ai/some-model"
+#   steps = 30           # left out: the provider's default
+#   cfg = 4.5            # guidance / CFG scale
+#   width = 1024         # left out: the benchmark's width and height
+#   height = 1024
+#   seed = 42            # fixed seeds 42, 43, ...; left out: the benchmark's seed, else random
+#   extra = { ... }      # provider-specific parameters, sent as they are
+#
+# Changing a model's settings (or the benchmark's prompt or size) starts a new set of images in the
+# library; anything else reuses the images already generated. Ids and prices change, so re-check
+# them with `rubiksbench models <name> --backend <provider>`.
+
+# Runware, needs RUNWARE_API_KEY in .env. Checked 2026-10-17.
+[runware]
+# Black Forest Labs, FLUX 3
+"FLUX 3 Image" = "bfl:flux@3-image"
+"FLUX 3 Image Klein" = "bfl:flux@3-image-klein"
+# Black Forest Labs, FLUX.2 (also: [max] bfl:7@1, [klein] 9B runware:400@2)
+"FLUX.2 [pro]" = "bfl:5@1"
+"FLUX.2 [dev]" = "runware:400@1"
+# Google, Nano Banana
+"Nano Banana 2.1" = "google:nano-banana@2.1"
+"Nano Banana 2 (Gemini 3.1 Flash Image)" = "google:4@3"
+# OpenAI, GPT-Image
+"GPT-Image-2.5 Sunburst" = "openai:gpt-image@2.5-sunburst"
+"GPT-Image-2.5 Flare" = "openai:gpt-image@2.5-flare"
+# Alibaba, Qwen-Image
+"Qwen-Image-3.0-Pro" = "alibaba:qwen-image@3.0-pro"
+"Qwen-Image-3.0" = "alibaba:qwen-image@3.0"
+# ByteDance, Seedream
+"Seedream 5.0 Pro" = "bytedance:seedream@5.0-pro"
+"Seedream 5.0 Flash" = "bytedance:seedream@5.0-flash"
+# Ideogram
+"Ideogram 4.5" = "ideogram:4.5@0"
+"Ideogram 4.0" = "ideogram:4@0"
+
+# fal.ai, needs FAL_KEY (or FAL_API_KEY) in .env. Checked 2026-10-17.
+# Endpoints without a seed (FLUX 3 Image, GPT-Image-2.5) run unseeded; the report marks those samples.
+[fal]
+"FLUX 3 Image" = "blackforestlabs/flux-3/text-to-image"
+"FLUX 3 Image Klein" = "blackforestlabs/flux-3/klein/text-to-image"
+"Nano Banana 2.1" = "google/nano-banana-2.1"
+"Nano Banana 2 (Gemini 3.1 Flash Image)" = "fal-ai/nano-banana-2"
+"GPT-Image-2.5 Sunburst" = "openai/gpt-image-2.5/sunburst/text-to-image"
+"GPT-Image-2.5 Flare" = "openai/gpt-image-2.5/flare/text-to-image"
+"Qwen-Image-3.0" = "alibaba/qwen-image-3/text-to-image"
+# Only on fal (checked 2026-10-19). Runs its default prompt expansion (enable_prompt_expansion), 50 steps, cfg 3.
+"MOSS-Image" = "fal-ai/moss-image"
+
+# Hugging Face Inference Providers, needs HF_TOKEN in .env. Checked 2026-10-17.
+# Ids are Hub repo ids; only models a provider serves for text-to-image work.
+[huggingface]
+"Qwen-Image-2512" = "Qwen/Qwen-Image-2512"                # fal-ai, replicate, wavespeed
+"Qwen-Image" = "Qwen/Qwen-Image"                          # fal-ai, replicate, together, wavespeed
+"FLUX.1 [dev]" = "black-forest-labs/FLUX.1-dev"           # deepinfra, fal-ai, replicate, wavespeed
+"FLUX.1 Krea [dev]" = "black-forest-labs/FLUX.1-Krea-dev" # fal-ai, replicate, wavespeed

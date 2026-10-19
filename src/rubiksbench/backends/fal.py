@@ -1,6 +1,6 @@
 """fal.ai backend, using the official ``fal-client`` package.
 
-Needs ``FAL_KEY`` in the environment (or ``key=``). Models are fal endpoint ids,
+Needs ``FAL_KEY`` (or ``FAL_API_KEY``) in the environment (or ``key=``). Models are fal endpoint ids,
 e.g. ``blackforestlabs/flux-3/text-to-image`` or ``fal-ai/nano-banana``.
 
 fal endpoints do not share one input format: sizes come as ``image_size``
@@ -110,7 +110,7 @@ class FalBackend(ImageBackend):
     name = "fal"
 
     def __init__(self, key: str | None = None):
-        self._key = key or os.environ.get("FAL_KEY")
+        self._key = key or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")
         self._client: fal_client.AsyncClient | None = None
         self._http: httpx.AsyncClient | None = None
         self._schemas: dict[str, dict[str, Any] | None] = {}
@@ -131,27 +131,38 @@ class FalBackend(ImageBackend):
     async def _properties(self, endpoint: str) -> dict[str, Any] | None:
         """Cached input properties of an endpoint; None if its schema is unavailable."""
         if endpoint not in self._schemas:
-            assert self._http is not None
-            params = {"endpoint_id": endpoint, "expand": "openapi-3.0"}
-            # Catalogue lookups (not generations) are rate limited, especially without a
-            # key, so they are retried with backoff; a transient failure is not cached.
-            for attempt in range(5):
-                try:
-                    response = await self._http.get(MODELS_API, params=params, headers=self._headers())
-                    if response.status_code == 429:
-                        await asyncio.sleep(2**attempt)
-                        continue
-                    response.raise_for_status()
-                    models = response.json().get("models", [])
-                    self._schemas[endpoint] = input_properties(models[0]["openapi"]) if models else None
-                except (KeyError, ValueError, IndexError):
-                    self._schemas[endpoint] = None
-                except httpx.HTTPError:
-                    return None
-                break
+            # Some keys get "Failed to fetch OpenAPI schema" instead of the schema, which is
+            # public, so it is asked for again without the key.
+            for headers in [self._headers(), {}] if self._key else [{}]:
+                openapi = await self._openapi(endpoint, headers)
+                if openapi is not None and "error" not in openapi:
+                    try:
+                        self._schemas[endpoint] = input_properties(openapi)
+                    except (KeyError, ValueError, IndexError):
+                        self._schemas[endpoint] = None
+                    break
             else:
                 return None
         return self._schemas[endpoint]
+
+    async def _openapi(self, endpoint: str, headers: dict[str, str]) -> dict[str, Any] | None:
+        """An endpoint's OpenAPI document as the catalogue returns it; None if it could not be fetched."""
+        assert self._http is not None
+        params = {"endpoint_id": endpoint, "expand": "openapi-3.0"}
+        # Catalogue lookups (not generations) are rate limited, especially without a
+        # key, so they are retried with backoff; a failure is not cached.
+        for attempt in range(5):
+            try:
+                response = await self._http.get(MODELS_API, params=params, headers=headers)
+                if response.status_code == 429:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                response.raise_for_status()
+                models = response.json().get("models", [])
+                return models[0].get("openapi") if models else None
+            except (httpx.HTTPError, ValueError):
+                return None
+        return None
 
     async def _download(self, url: str) -> bytes:
         if url.startswith("data:"):

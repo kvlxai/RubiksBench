@@ -491,9 +491,12 @@ def render_html(stamp: str, run: dict[str, Any], scores: dict[str, Any], samples
     config = run.get("config", {})
     seeds = "random" if config.get("seed") is None else f"from {config['seed']}"
     extractor = next((s["extractor"] for s in samples if s["extractor"]), config.get("extractor", "–"))
+    # Older runs name one backend; newer ones name it per model.
+    backends = config.get("backend") or ", ".join(
+        sorted({m["backend"] for m in config.get("models", {}).values() if isinstance(m, dict)})) or "?"
     meta = (
         f"<p class='meta'>Prompt: “{escape(str(config.get('prompt', '?')))}”</p>"
-        f"<p class='meta'>Backend {escape(str(config.get('backend', '?')))} · "
+        f"<p class='meta'>Backend {escape(str(backends))} · "
         f"{escape(str(config.get('iterations', '?')))} images per model · seeds {seeds} · "
         f"extractor {escape(str(extractor))} · evaluator {EVALUATOR_VERSION} · "
         f"run started {escape(str(run.get('started_at', '?')))} · scored {escape(stamp)}</p>"

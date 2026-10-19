@@ -2,7 +2,8 @@
 
     runs/<run_id>/
         run.json              run configuration
-        generations.jsonl     one record per generation attempt (including failures and backfills)
+        generations.jsonl     one record per sample (including failures and backfills); images
+                              taken from the image library carry ``reused_from``
         evaluations.jsonl     one record per generated image, appended as each is scored
         references.jsonl      real reference photos scored with the run (copied to references/)
         results-<UTC>.json/.html      scores and report, written on every (re-)scoring
@@ -11,6 +12,7 @@
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,15 @@ class RunStore:
             path.write_bytes(result.image)
             record["image_path"] = str(path.relative_to(self.root))
             record["image_sha256"] = hashlib.sha256(result.image).hexdigest()
+        with (self.root / "generations.jsonl").open("a") as f:
+            f.write(json.dumps(record) + "\n")
+        return record
+
+    def add_image(self, sample_id: str, record: dict[str, Any], image: Path, **fields: Any) -> dict[str, Any]:
+        """Add a copy of an image already stored elsewhere (the image library)."""
+        path = self.images / f"{sample_id}{image.suffix}"
+        shutil.copyfile(image, path)
+        record = {"sample_id": sample_id, **fields, **record, "image_path": str(path.relative_to(self.root))}
         with (self.root / "generations.jsonl").open("a") as f:
             f.write(json.dumps(record) + "\n")
         return record

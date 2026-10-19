@@ -1,0 +1,32 @@
+# What is the same for every model. Images come from the library (library/) when it has them for the
+# same model, settings and prompt; only the missing ones are generated, so adding a model to a
+# benchmark only pays for that model.
+extractor = "vision"                                                           # how stickers are read: "vision", "sam" (needs `uv sync --extra ml`) or "annotation"
+references = "reference_images"                                                # real cube photos scored with every run as a calibration row
+prompt = "A valid scrambled standard 3x3 Rubik's Cube on a #7f7f7f background"
+iterations = 10                                                                # images per model, each with a random seed (add `seed = N` for fixed seeds N, N+1, ...)
+width = 1024
+height = 1024
+models_file = "models.toml"                                                    # per-provider model ids and settings, next to this file
+library = "./library/"                                                         # generated images, reused by every run and filled by `backfill`
+
+# provider = [model names from models.toml]; a name picked on two providers is shown as "Name (provider)".
+[models]
+runware = [
+  "FLUX 3 Image",
+  "FLUX 3 Image Klein",
+  "FLUX.2 [pro]",
+  "FLUX.2 [dev]",
+  "Nano Banana 2.1",
+  "Nano Banana 2 (Gemini 3.1 Flash Image)",
+  "GPT-Image-2.5 Sunburst",
+  "GPT-Image-2.5 Flare",
+  "Qwen-Image-3.0-Pro",
+  "Qwen-Image-3.0",
+  "Seedream 5.0 Pro",
+  "Seedream 5.0 Flash",
+  "Ideogram 4.5",
+  "Ideogram 4.0",
+]
+fal = ["MOSS-Image"]
+# huggingface = ["..."]

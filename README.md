@@ -17,10 +17,13 @@ uv run rubiksbench validate observation.json          # check a hand-read cube (
 uv run rubiksbench validate-image cube.png            # extract and score an image directly
 uv run --env-file .env rubiksbench models "Flux 3"   # find model ids (--all includes LoRAs/video)
 uv run rubiksbench models flux --backend huggingface  # Hugging Face models served by Inference Providers
-uv run --env-file .env rubiksbench run configs/benchmark_runware.toml   # .env: RUNWARE_API_KEY / HF_TOKEN / FAL_KEY
+uv run --env-file .env rubiksbench run configs/benchmark.toml   # .env: RUNWARE_API_KEY / HF_TOKEN / FAL_KEY (or FAL_API_KEY);
+                                                        #   generates only the images the library lacks
+uv run rubiksbench library list                         # the stored images, per model and settings
+uv run rubiksbench library import runs/<run>            # add an earlier run's images to the library
 uv run rubiksbench score runs/<run>                     # re-evaluate + re-score an existing run (no API calls;
                                                         #   a line per image with the time left)
-uv run --env-file .env rubiksbench backfill runs/<run>  # resend a run's failed requests (same settings and seeds)
+uv run --env-file .env rubiksbench backfill configs/benchmark.toml  # generate what the library lacks, no scoring
 uv run rubiksbench site runs/<run> site/ --url https://<you>.github.io/RubiksBench/ --share-image <sample>
                                                   # shareable static site of the newest report (GitHub Pages)
 ```
@@ -144,20 +147,68 @@ show the same three faces as the image.
 The HTML report shows each model's mean validity, who its images fool and its rubric score, plus the
 share of points earned per check. The verdicts (`VALID_STANDARD`, …) are still reported next to them.
 
-## Benchmark file
+## Benchmark and models files
+
+A benchmark file holds what is the same for every model, and picks models by name, per provider,
+from a models file:
 
 ```toml
-backend = "runware"      # or "huggingface" (HF_TOKEN) or "fal" (FAL_KEY); see configs/
+# configs/benchmark.toml
 extractor = "vision"     # or "sam" / "annotation"; `score` reuses it, `--extractor` overrides
 prompt = "A valid scrambled Rubik's Cube"
-iterations = 20          # images per model; random seed per image unless `seed = N` is set
+iterations = 10          # images per model; random seed per image unless `seed = N` is set
+width = 1024
+height = 1024
+models_file = "models.toml"   # next to this file
+library = "library"           # where generated images are kept and reused
 
 [models]
-"FLUX 3 Image" = "bfl:flux@3-image"   # display name = model id
+runware = ["FLUX 3 Image", "Nano Banana 2.1"]
+fal = ["Some fal-only model"]
 ```
 
+The models file lists the models each provider serves (`runware` needs `RUNWARE_API_KEY`, `fal`
+`FAL_KEY`, `huggingface` `HF_TOKEN`), with their generation settings. Anything left out takes the
+benchmark's value, or the provider's default:
+
+```toml
+# configs/models.toml
+[runware]
+"FLUX 3 Image" = "bfl:flux@3-image"   # just the model id
+
+[fal."Some fal-only model"]
+id = "fal-ai/some-model"
+steps = 30
+cfg = 4.5
+width = 1024             # overrides the benchmark's width and height
+height = 1024
+seed = 42                # fixed seeds 42, 43, ...
+extra = { sampler = "euler" }   # provider-specific parameters, sent as they are
+```
+
+A name picked on two providers is shown as "Name (provider)".
+
+### Image library
+
+Every generated image is kept in the benchmark's `library` directory, grouped by provider, model id and every request setting
+except the seed (prompt, size, steps, CFG, extra parameters):
+`library/<provider>/<model id>/<settings hash>/` holds `settings.json`, `generations.jsonl` and
+`images/`. A run takes each model's images from its group, oldest first (with fixed seeds, the
+images with those seeds), and generates only the ones missing. Adding a new model to a benchmark
+and running it again therefore pays only for the new model, and scores it alongside the earlier
+ones in one report. Changing the prompt or a model's settings starts a new group. Reused samples
+carry `reused_from` in the run's `generations.jsonl`, and their images are copied into the run, so
+a run directory stays self-contained. `library import` adds the images of runs made before the
+library existed (as copies; the run is left as it is).
+
+`backfill configs/benchmark.toml` only fills the library: for each model it requests the images
+still missing up to `iterations` (with fixed seeds, the missing seeds), once each, without scoring.
+Failed requests are logged and requested again by the next `backfill`. A `run` afterwards then only
+scores. A `run` without a backfill generates the missing images itself, and counts failures as
+generation failures in its report.
+
 Models run one after another, one request at a time, and each image is scored as soon as it is
-generated (the verdict is printed on its log line). Ctrl-C stops the run and still reports what was
+generated or taken from the library (the verdict is printed on its log line). Ctrl-C stops the run and still reports what was
 generated so far. Each run directory holds `run.json`,
 `generations.jsonl` (every attempt, including failures, with seed and the exact request),
 `images/` and `evaluations.jsonl`. Every scoring pass (at the end of `run`, or via `score`) also writes
