@@ -14,6 +14,7 @@ that.
 uv sync
 uv run pytest
 uv run rubiksbench validate observation.json          # check a hand-read cube (see Observation format)
+uv run rubiksbench validate-image cube.png            # extract and score an image directly
 uv run --env-file .env rubiksbench models "Flux 3"   # find model ids (--all includes LoRAs/video)
 uv run rubiksbench models flux --backend huggingface  # Hugging Face models served by Inference Providers
 uv run --env-file .env rubiksbench run configs/benchmark_runware.toml   # .env: RUNWARE_API_KEY / HF_TOKEN / FAL_KEY
@@ -23,6 +24,16 @@ uv run --env-file .env rubiksbench backfill runs/<run>  # resend a run's failed 
 uv run rubiksbench site runs/<run> site/ --url https://<you>.github.io/RubiksBench/ --share-image <sample>
                                                   # shareable static site of the newest report (GitHub Pages)
 ```
+
+`validate-image` prints the same text summary as a benchmark run: the verdict, failure flags,
+validity percentage, and rubric points (for example, `INVALID (duplicate_centers) · validity 32% · 9/17`).
+Add `-v` / `--verbose` to list failed rubric checks with their descriptions. Blocked or inconclusive
+checks are not listed as failures. Use `--json` for the full JSON report instead; it overrides
+`--verbose` so the output remains valid JSON. Use `--extractor sam` or `--extractor annotation` to select another reader,
+and `--no-scramble` to skip computing a witness scramble. The default `vision` extractor expects
+a three-face corner view and writes `<image stem>.extraction.jpg` beside the input. Its first
+use downloads the background-removal model (see Sticker extraction below). An unreadable image
+or uncertain extraction is reported as `INCONCLUSIVE`; a missing file exits with an error.
 
 ## Scoring
 

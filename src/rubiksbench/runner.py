@@ -63,7 +63,7 @@ async def generate_run(config: BenchmarkConfig, store: RunStore, extractor: Extr
                 sample_id = f"{_slug(name)}__{index:04d}"
                 record = store.add_generation(sample_id, result, model_name=name, iteration=index)
                 if result.ok:
-                    status = _status(evaluate_sample(store, record, extractor))
+                    status = format_status(evaluate_sample(store, record, extractor))
                 else:
                     status = f"GENERATION FAILED {result.error.code}: {result.error.message}"
                 _log(f"[{name}] {index + 1}/{config.iterations} seed={seed} {result.latency_s:.1f}s {status}")
@@ -97,7 +97,7 @@ async def backfill_run(store: RunStore, extractor: Extractor) -> int:
     return len(failed)
 
 
-def _status(evaluation: dict[str, Any]) -> str:
+def format_status(evaluation: dict[str, Any]) -> str:
     """One image's result for a progress line, e.g. "INVALID (duplicate_centers) · validity 32% · 9/17"."""
     flags = ", ".join(evaluation.get("flags", []))
     status = evaluation["verdict"] + (f" ({flags})" if flags else "")
@@ -185,7 +185,7 @@ def evaluate_run(
     durations: list[float] = []
     for done, record in enumerate(records, 1):
         begun = time.monotonic()
-        status = _status(evaluate_sample(store, record, extractor))
+        status = format_status(evaluate_sample(store, record, extractor))
         durations.append(time.monotonic() - begun)
         # The first image includes loading the models, so it is left out of the estimate.
         typical = sum(durations[1:]) / (len(durations) - 1) if len(durations) > 1 else None

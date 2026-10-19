@@ -1,6 +1,7 @@
 """Command line entry point.
 
     rubiksbench validate observation.json
+    rubiksbench validate-image cube.png
     rubiksbench models "Flux 3"
     rubiksbench run configs/benchmark_runware.toml
     rubiksbench score runs/<run>
@@ -17,10 +18,11 @@ from typing import Any
 from .backends import available_backends, get_backend
 from .config import BenchmarkConfig
 from .cube.observation import Observation
-from .evaluation.evaluator import validate
+from .evaluation.evaluator import evaluate_extraction, validate
+from .evaluation.rubric import CHECKS, FAIL
 from .evaluation.scoring import format_table
 from .site import build_site
-from .runner import backfill_run, evaluate_run, generate_run, import_references, new_run_dir, report_run
+from .runner import backfill_run, evaluate_run, format_status, generate_run, import_references, new_run_dir, report_run
 from .storage.results import RunStore
 from .vision.extractor import EXTRACTORS
 
@@ -54,6 +56,26 @@ async def _models(args: argparse.Namespace) -> int:
         extra = ", ".join(x for x in (m.architecture, m.source) if x)
         name = f"  {m.name}" if m.name != m.id else ""
         print(f"{m.id:<{width}}{name}" + (f"  ({extra})" if extra else ""))
+    return 0
+
+
+def cmd_validate_image(args: argparse.Namespace) -> int:
+    """Read and score one image using the benchmark's extraction pipeline."""
+    image = Path(args.image)
+    if not image.is_file():
+        print(f"image file does not exist or is not a regular file: {image}", file=sys.stderr)
+        return 1
+    extraction = EXTRACTORS[args.extractor]().extract(image)
+    report = evaluate_extraction(extraction, with_scramble=not args.no_scramble)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(format_status(report))
+        if args.verbose:
+            failed = [check for check in CHECKS if report["rubric"]["checks"].get(check.id) == FAIL]
+            print("Failed rubric checks:" if failed else "No failed rubric checks.")
+            for check in failed:
+                print(f"  - {check.title}: {check.description}")
     return 0
 
 
@@ -101,6 +123,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("observation", help="JSON file mapping faces (U R F D L B) to 9-sticker grids")
     p.add_argument("--no-scramble", action="store_true", help="skip computing a witness scramble")
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("validate-image", help="extract and score a cube directly from an image")
+    p.add_argument("image", help="path to a cube image")
+    p.add_argument("--extractor", default="vision", choices=sorted(EXTRACTORS),
+                   help="sticker extractor (default: vision)")
+    p.add_argument("--json", action="store_true", help="print the full report as JSON (overrides --verbose)")
+    p.add_argument("-v", "--verbose", action="store_true", help="also describe failed rubric checks in text output")
+    p.add_argument("--no-scramble", action="store_true", help="skip computing a witness scramble")
+    p.set_defaults(func=cmd_validate_image)
 
     p = sub.add_parser("models", help="search a backend's models and print their ids")
     p.add_argument("query", help='name to search for, e.g. "Flux 3"')
