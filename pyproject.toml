@@ -1,6 +1,6 @@
 [project]
 name = "rubiksbench"
-version = "0.5.0"
+version = "0.6.0"
 description = "Benchmark: can image models draw a valid scrambled 3x3 Rubik's Cube?"
 readme = "README.md"
 license = "MIT"

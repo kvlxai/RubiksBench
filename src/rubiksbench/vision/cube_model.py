@@ -62,8 +62,7 @@ class FittedCube:
     start_score: float  # the same for the starting pose
 
     def project(self, world: np.ndarray) -> np.ndarray:
-        pts, _ = cv2.projectPoints(np.asarray(world, np.float32), self.rotation, self.translation, self.camera, None)
-        return pts.reshape(-1, 2)
+        return project_points(world, self.rotation, self.translation, self.camera)
 
     def quads(self) -> dict[str, np.ndarray]:
         """Each visible face's corners in the image, in facelet order 1, 3, 9, 7."""
@@ -72,6 +71,15 @@ class FittedCube:
 
     def corner(self, name: str) -> np.ndarray:
         return self.project(np.array([CORNERS[name]], np.float32))[0]
+
+
+def project_points(world: np.ndarray, rotation: np.ndarray, translation: np.ndarray, camera: np.ndarray) -> np.ndarray:
+    """Pinhole projection of world points to pixels. cv2.projectPoints gives the same, but also
+    computes its Jacobian, which made it most of the fitting time."""
+    r, _ = cv2.Rodrigues(np.asarray(rotation, np.float64))
+    p = np.asarray(world, np.float64) @ r.T + np.asarray(translation, np.float64).ravel()
+    return np.stack([camera[0, 0] * p[:, 0] / p[:, 2] + camera[0, 2],
+                     camera[1, 1] * p[:, 1] / p[:, 2] + camera[1, 2]], 1)
 
 
 def _camera(log_focal: float, shape: tuple[int, ...]) -> np.ndarray:
@@ -101,10 +109,11 @@ def _edges(lab: np.ndarray) -> np.ndarray:
 def _contrast(maps: list[np.ndarray], project, gap: float) -> float:
     """For each map: its mean on the predicted seams minus its trimmed mean inside the cells."""
     total = 0.0
+    points = {f: project(_WORLD[f]) for f in "UFR"}
     for m in maps:
         on_seam, inside = [], []
         for f in "UFR":
-            values = _sample(m, project(_WORLD[f]))
+            values = _sample(m, points[f])
             on_seam.append(values[_SEAM < gap])
             inner = _SEAM > gap + _INSIDE
             inside.append(np.bincount(_CELL[inner], weights=values[inner], minlength=9)
@@ -123,8 +132,7 @@ def _start(image_shape: tuple[int, ...], outline: np.ndarray) -> np.ndarray | No
         ok, rvec, tvec = cv2.solvePnP(world, np.asarray(outline, np.float64), camera, None, flags=cv2.SOLVEPNP_ITERATIVE)
         if not ok:
             continue
-        pts, _ = cv2.projectPoints(world, rvec, tvec, camera, None)
-        err = float(np.linalg.norm(pts.reshape(-1, 2) - outline, axis=1).mean())
+        err = float(np.linalg.norm(project_points(world, rvec, tvec, camera) - outline, axis=1).mean())
         if best is None or err < best[0]:
             best = (err, np.r_[rvec.ravel(), tvec.ravel(), log_focal])
     return None if best is None else best[1]
@@ -152,7 +160,7 @@ def fit_cube(image: np.ndarray, hexagon: np.ndarray, inner: np.ndarray) -> Fitte
 
     def projector(pose: np.ndarray):
         camera = _camera(pose[6], image.shape)
-        return lambda world: cv2.projectPoints(world, pose[:3], pose[3:6], camera, None)[0].reshape(-1, 2)
+        return lambda world: project_points(world, pose[:3], pose[3:6], camera)
 
     def objective(x: np.ndarray, blurred: list[np.ndarray]) -> float:
         pose, gap = unpack(x)

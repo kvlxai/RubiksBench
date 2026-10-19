@@ -218,3 +218,16 @@ def test_only_a_lone_misfit_cell_is_out_of_place():
     # A whole column off means the fit is off along an edge, not three displaced cubies.
     assert out_of_place(clean | {"R3": (0.25, 0.0), "R6": (0.25, 0.0), "R9": (0.25, 0.0)}) == []
     assert out_of_place(clean | {"U5": (0.4, 0.0)}) == []  # centers may carry a logo
+
+
+def test_projection_matches_opencv():
+    import cv2
+    import numpy as np
+
+    from rubiksbench.vision.cube_model import project_points
+
+    world = np.random.default_rng(0).uniform(-1.5, 1.5, (50, 3)).astype(np.float32)
+    rotation, translation = np.array([0.4, -0.7, 0.2]), np.array([0.1, -0.2, 9.0])
+    camera = np.array([[1800, 0, 512], [0, 1800, 512], [0, 0, 1]], np.float64)
+    expected = cv2.projectPoints(world, rotation, translation, camera, None)[0].reshape(-1, 2)
+    assert np.allclose(project_points(world, rotation, translation, camera), expected, atol=1e-3)
