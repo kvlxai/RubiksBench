@@ -6,7 +6,7 @@ Can image models draw a **valid scrambled 3×3 Rubik's Cube**? RubiksBench gener
 prompt, reads the visible stickers, and checks whether a real, reachable cube state could look like
 that.
 
-**Latest results:** [kvlxai.github.io/RubiksBench](https://kvlxai.github.io/RubiksBench/) (15 models, 10 images each, plus real-cube reference photos).
+**Latest results:** [kvlxai.github.io/RubiksBench](https://kvlxai.github.io/RubiksBench/) (37 models, 10 images each, plus real-cube reference photos).
 
 [![RubiksBench results](https://kvlxai.github.io/RubiksBench/preview.png)](https://kvlxai.github.io/RubiksBench/)
 
