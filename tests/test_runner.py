@@ -290,3 +290,89 @@ def test_rescoring_reports_progress_per_image(tmp_path, capsys):
     assert lines[1].startswith("[Good] #0  1/2  ") and "VALID_STANDARD · validity 100% · 17/17" in lines[1]
     # No estimate from the first image alone (it includes loading the models), none after the last.
     assert "left" not in lines[1] and lines[2].startswith("[Good] #1  2/2  ") and "left" not in lines[2]
+
+
+def test_gallery_shows_each_models_best_image_and_halls_leave_out_photos(tmp_path):
+    import re
+
+    config = bench(tmp_path, "iterations = 3", models='["Good", "New"]', catalogue=MODELS + '"New" = "new"\n')
+    store = RunStore(tmp_path / "run")
+    write(store.images / "good__0001.json", json.dumps(REAL_CUBE))  # the second image is the valid one
+    asyncio.run(generate_run(config, store, AnnotationExtractor(), ImageLibrary(tmp_path / "library")))
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    (refs / "reference_1.png").write_bytes(b"img")
+    write(refs / "reference_1.json", json.dumps(REAL_CUBE))
+    html = evaluate_run(store, AnnotationExtractor(), references=refs)[1]["html"].read_text()
+
+    gallery = html.split("id='gallery'>", 1)[1]
+    shown = re.findall(r"<div class='sample' data-model='([^']+)'[^>]*?(?<! hidden)>", gallery)
+    assert sorted(shown) == ["Good", "New", "Reference photos (real cubes)"]  # the best of each model
+    assert "src='images/good__0001.png'" in gallery  # the best Good image loads at once
+    assert "data-src='images/good__0000.png'" in gallery  # the rest wait until shown
+    assert len(re.findall(r"<div class='sample'[^>]* hidden>", gallery)) == 4
+    halls = html.split("<h2>Hall of Fame</h2>", 1)[1].split("<h2>Samples</h2>", 1)[0]
+    assert "images/good__0001.png" in halls and "references/" not in halls
+
+
+def test_models_generate_side_by_side_but_each_model_one_at_a_time(tmp_path):
+    @register_backend
+    class SlowBackend(ImageBackend):
+        name = "slow"
+        running: dict[str, int] = {}
+        peak = {"total": 0, "per_model": 0}
+
+        async def generate(self, request: GenerationRequest) -> GenerationResult:
+            self.running[request.model] = self.running.get(request.model, 0) + 1
+            self.peak["total"] = max(self.peak["total"], sum(self.running.values()))
+            self.peak["per_model"] = max(self.peak["per_model"], self.running[request.model])
+            await asyncio.sleep(0.01)
+            self.running[request.model] -= 1
+            result = GenerationResult(request, self.name, utc_now(), 0.01)
+            result.image, result.image_format = f"img {request.model} {request.seed}".encode(), "png"
+            return result
+
+    write(tmp_path / "models.toml", "[slow]\n" + "".join(f'"M{i}" = "m{i}"\n' for i in range(5)))
+    config = BenchmarkConfig.load(write(tmp_path / "b.toml", "iterations = 3\nconcurrency = 3\n[models]\n"
+                                        f"slow = {json.dumps([f'M{i}' for i in range(5)])}\n"))
+    library = ImageLibrary(tmp_path / "library")
+    assert asyncio.run(backfill(config, library)) == (15, 0)
+    assert SlowBackend.peak == {"total": 3, "per_model": 1}
+
+    store = RunStore(tmp_path / "run")
+    asyncio.run(generate_run(config, store, AnnotationExtractor(), library))
+    assert len(store.evaluations()) == 15  # everything reused from the library, then scored
+
+
+def test_scored_images_are_cached_per_evaluator(tmp_path, monkeypatch, capsys):
+    from rubiksbench.storage import evaluation_cache
+    from rubiksbench.storage.evaluation_cache import EvaluationCache
+
+    class CountingExtractor(AnnotationExtractor):
+        """Hand annotations are never cached, so this one pretends to be a cacheable reader."""
+        cache_variant = "counting"
+        calls = 0
+
+        def extract(self, path):
+            CountingExtractor.calls += 1
+            return super().extract(path)
+
+    config = bench(tmp_path, "iterations = 2")
+    store = RunStore(tmp_path / "run")
+    write(store.images / "good__0000.json", json.dumps(REAL_CUBE))
+    cache = EvaluationCache(tmp_path / "library" / "evaluations")
+    asyncio.run(generate_run(config, store, CountingExtractor(), ImageLibrary(tmp_path / "library"), cache))
+    first = store.evaluations()
+    assert CountingExtractor.calls == 2
+
+    capsys.readouterr()
+    scores, _ = evaluate_run(store, CountingExtractor(), cache=cache)
+    assert CountingExtractor.calls == 2 and store.evaluations() == first  # nothing read again, same results
+    assert "2 of 2 images already scored by this evaluator" in capsys.readouterr().err
+
+    monkeypatch.setattr(evaluation_cache, "code_fingerprint", lambda: "changed-code")
+    evaluate_run(store, CountingExtractor(), cache=cache)
+    assert CountingExtractor.calls == 4  # different scoring code: scored again
+
+    evaluate_run(store, AnnotationExtractor(), cache=cache)  # no cache_variant: never cached
+    assert not list((tmp_path / "library" / "evaluations").rglob("*annotation*"))

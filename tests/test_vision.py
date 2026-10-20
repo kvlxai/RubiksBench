@@ -231,3 +231,14 @@ def test_projection_matches_opencv():
     camera = np.array([[1800, 0, 512], [0, 1800, 512], [0, 0, 1]], np.float64)
     expected = cv2.projectPoints(world, rotation, translation, camera, None)[0].reshape(-1, 2)
     assert np.allclose(project_points(world, rotation, translation, camera), expected, atol=1e-3)
+
+
+@pytest.mark.parametrize("name", [
+    "nano-banana-pro__0002",  # a 3x3 cube with its middle layer turned: the outline is not a clean hexagon
+    "minimax-image-01__0008",  # a 3x3 cube on a green background the cut-out mistook for cube
+])
+def test_rows_counted_on_a_skewed_outline_are_inconclusive_not_wrong(extractor, name):
+    extraction = extractor.extract(FIXTURES / f"{name}.jpg")
+    assert extraction.quality["shape"] == "inconclusive"
+    assert Flag.WRONG_GRID_SIZE not in extraction.flags and extraction.quality["grid"] == "inconclusive"
+    assert evaluate_extraction(extraction)["verdict"] == "INCONCLUSIVE"

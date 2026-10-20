@@ -26,7 +26,9 @@ from .evaluation.scoring import format_table
 from .site import build_site
 from .runner import (
     backfill, evaluate_run, format_status, generate_run, import_references, import_run, new_run_dir, report_run,
+    score_unscored,
 )
+from .storage.evaluation_cache import EvaluationCache
 from .storage.library import ImageLibrary
 from .storage.results import RunStore
 from .vision.extractor import EXTRACTORS
@@ -90,12 +92,14 @@ def _run(args: argparse.Namespace) -> int:
     store = RunStore(Path(args.run_dir) if args.run_dir else new_run_dir(Path(args.out), config_path))
     print(f"run directory: {store.root}", file=sys.stderr)
     extractor = EXTRACTORS[args.extractor or config.extractor]()
+    cache = None if args.no_cache else EvaluationCache(Path(config.library) / "evaluations")
     try:
-        asyncio.run(generate_run(config, store, extractor, ImageLibrary(Path(config.library))))
+        asyncio.run(generate_run(config, store, extractor, ImageLibrary(Path(config.library)), cache))
     except KeyboardInterrupt:
-        print("\ninterrupted: reporting the images generated so far", file=sys.stderr)
+        print("\ninterrupted: scoring and reporting the images generated so far", file=sys.stderr)
+        score_unscored(store, extractor, cache)
     if config.references:
-        import_references(store, Path(config.references), extractor)
+        import_references(store, Path(config.references), extractor, cache=cache)
     return _report(*report_run(store))
 
 
@@ -107,12 +111,13 @@ def _backfill(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _score(store: RunStore, extractor: str | None, references: str | None = None) -> int:
+def _score(store: RunStore, extractor: str | None, references: str | None = None, use_cache: bool = True) -> int:
     # Default to the extractor (and reference photos) the run was configured with.
     config = store.read_config().get("config", {})
     name = extractor or config.get("extractor", "vision")
     directory = references or config.get("references")
-    return _report(*evaluate_run(store, EXTRACTORS[name](), Path(directory) if directory else None))
+    cache = EvaluationCache(Path(config.get("library", "library")) / "evaluations") if use_cache else None
+    return _report(*evaluate_run(store, EXTRACTORS[name](), Path(directory) if directory else None, cache))
 
 
 def _library_import(args: argparse.Namespace) -> int:
@@ -167,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="runs", help="parent directory for run directories")
     p.add_argument("--run-dir", help="explicit run directory (default: runs/<timestamp>-<config name>)")
     p.add_argument("--extractor", choices=sorted(EXTRACTORS), help="override the TOML's extractor")
+    p.add_argument("--no-cache", action="store_true", help="score every image again, even ones already scored")
     p.set_defaults(func=_run)
 
     p = sub.add_parser("backfill", help="generate the images a benchmark's models lack in the library, without scoring")
@@ -187,7 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("run_dir")
     p.add_argument("--extractor", choices=sorted(EXTRACTORS), help="override the run's extractor")
     p.add_argument("--references", help="directory of real cube photos to score alongside the run")
-    p.set_defaults(func=lambda a: _score(RunStore(Path(a.run_dir)), a.extractor, a.references))
+    p.add_argument("--no-cache", action="store_true", help="score every image again, even ones already scored")
+    p.set_defaults(func=lambda a: _score(RunStore(Path(a.run_dir)), a.extractor, a.references, not a.no_cache))
 
     p = sub.add_parser("site", help="build a shareable static site (e.g. for GitHub Pages) from a run's newest report")
     p.add_argument("run_dir")

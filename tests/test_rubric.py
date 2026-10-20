@@ -185,3 +185,28 @@ def test_only_a_solver_notices_a_parity_error():
                    validate(observation, with_scramble=False).to_dict())
     assert result["checks"]["unique_pieces"] == "pass" and result["checks"]["solvable"] == "fail"
     assert FOOLS[result["fools"]] == "a cuber"
+
+
+def test_validity_halves_per_half_life_and_is_zero_only_when_it_fools_no_one():
+    from rubiksbench.evaluation.evaluator import evaluate_extraction
+    from rubiksbench.evaluation.rubric import FOOLS
+    from rubiksbench.evaluation.validity import HALF_LIFE
+
+    def evaluated(faces, **quality):
+        extraction = Extraction("annotation", Observation.from_faces(faces), quality=QUALITY | quality)
+        return evaluate_extraction(extraction, with_scramble=False)
+
+    # Two green centers: anyone who has held a cube notices, but it fools a casual viewer, so it keeps a score.
+    record = evaluated(dict(REAL_CUBE, R="ORG WGG OYB"))
+    validity = record["validity"]
+    assert FOOLS[record["rubric"]["fools"]] == "a casual viewer"
+    assert validity["score"] == 0.5 ** ((validity["repairs"] + validity["defects"]) / HALF_LIFE) * validity["scramble_factor"]
+    assert 0 < validity["score"] < 1 and "reason" not in validity
+    # Coloring at random (chance) would land at 25%.
+    assert 0.5 ** (2 * HALF_LIFE / HALF_LIFE) == 0.25
+
+    # Letters on the stickers are seen at a glance: it fools no one, so 0%, with the stickers still listed.
+    record = evaluated(REAL_CUBE, stickers="fail")
+    assert FOOLS[record["rubric"]["fools"]] == "no one"
+    assert record["validity"]["score"] == 0 and "fools no one" in record["validity"]["reason"]
+    assert "repairs" in record["validity"]

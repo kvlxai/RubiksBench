@@ -6,7 +6,7 @@ from rubiksbench.cube.facelets import facelet_index
 from rubiksbench.cube.observation import Observation
 from rubiksbench.cube.repair import CHANCE_DISTANCE, chance_distance, repair
 from rubiksbench.evaluation.evaluator import validate
-from rubiksbench.evaluation.validity import validity
+from rubiksbench.evaluation.validity import HALF_LIFE, validity
 from rubiksbench.vision.extraction import Extraction
 
 from .test_validator import REAL_CUBE, corner_view, scrambled
@@ -63,14 +63,24 @@ def scored(faces, quality=QUALITY, details=None):
 def test_validity_is_full_for_a_valid_cube_and_drops_per_sticker():
     assert scored(REAL_CUBE)["score"] == 1.0
     one_off = scored(dict(REAL_CUBE, R="ORG WGG OYB"))
-    assert one_off["repairs"] == 1 and one_off["score"] == pytest.approx(1 - 1 / CHANCE_DISTANCE)
+    assert one_off["repairs"] == 1 and one_off["score"] == pytest.approx(0.5 ** (1 / HALF_LIFE))
+    # Every half-life of stickers to fix halves the score; random colors land at 25%.
+    assert HALF_LIFE == pytest.approx(CHANCE_DISTANCE / 2)
 
 
 def test_sticker_defects_count_as_stickers_to_fix():
-    quality = QUALITY | {"single_color": "fail"}
-    result = scored(REAL_CUBE, quality, {"geometry": {"split": ["F2", "U8"]}})
+    # A second shade of a color takes someone who has held a cube to notice.
+    quality = QUALITY | {"shades": "fail"}
+    result = scored(REAL_CUBE, quality, {"geometry": {"off_shade": ["F2", "U8"]}})
     assert result["repairs"] == 0 and result["defects"] == 2
-    assert result["score"] == pytest.approx(1 - 2 / CHANCE_DISTANCE)
+    assert result["score"] == pytest.approx(0.5 ** (2 / HALF_LIFE))
+
+
+def test_a_flaw_seen_at_a_glance_scores_zero_but_keeps_its_stickers_to_fix():
+    # Two-colored stickers are plain to anyone at a glance: the image fools no one.
+    result = scored(REAL_CUBE, QUALITY | {"single_color": "fail"}, {"geometry": {"split": ["F2", "U8"]}})
+    assert result["score"] == 0.0 and "fools no one" in result["reason"]
+    assert result["defects"] == 2 and result["defective"] == ["F2", "U8"]
 
 
 def test_an_unreadable_or_solved_cube_scores_zero():
@@ -92,5 +102,5 @@ def test_a_designed_pattern_is_valid_but_held_in_slightly_less_regard():
     rubric = grade(extraction, validate(observation, with_scramble=False).to_dict())
     result = validity(extraction, rubric["checks"])
     assert rubric["checks"]["scrambled"] == "fail" and result["repairs"] == 0
-    assert 0.8 <= result["score"] < 1.0 and result["score"] == result["scramble_factor"]
+    assert 0.95 <= result["score"] < 1.0 and result["score"] == result["scramble_factor"]
     assert FOOLS[rubric["fools"]] == "everyone"  # it is a valid cube: nothing to see through

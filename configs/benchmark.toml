@@ -9,6 +9,7 @@ width = 1024
 height = 1024
 models_file = "models.toml"                                                    # per-provider model ids and settings, next to this file
 library = "./library/"                                                         # generated images, reused by every run and filled by `backfill`
+concurrency = 8                                                                # models generated at the same time; each model's own images stay one at a time
 
 # provider = [model names from models.toml]; a name picked on two providers is shown as "Name (provider)".
 [models]
@@ -27,6 +28,30 @@ runware = [
   "Seedream 5.0 Flash",
   "Ideogram 4.5",
   "Ideogram 4.0",
+  "Nano Banana Pro",
+  "GPT Image 2",
+  "Seedream 5.0 Lite",
+  "Kling IMAGE 3.0",
+  "Kling IMAGE O3",
+  "Recraft V4.1",
+  "Recraft V4.1 Flash",
+  "Grok Imagine Image 2.0",
+  "Krea 2 Large",
+  "HiDream-I1 Full",
+  "Z-Image",
+  "Z-Image-Turbo",
+  "ERNIE-Image",
+  "ERNIE-Image-Turbo",
+  "Luma UNI-1",
+  "Bria FIBO",
 ]
-fal = ["MOSS-Image"]
+fal = [
+  "MOSS-Image",
+  "Hunyuan Image 3.0",
+  "Krea 3",
+  "HiDream O1",
+  "Luma Photon",
+  "MiniMax image-01",
+  "Stable Diffusion 3.5 Large",
+]
 # huggingface = ["..."]

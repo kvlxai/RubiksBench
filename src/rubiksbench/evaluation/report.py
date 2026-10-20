@@ -23,6 +23,7 @@ from .rubric import CHECKS, FOOLS, MAX_POINTS, NOTICED_BY
 from .scoring import ranked
 from ..cube.color_scheme import ColorScheme, rotation_moves
 from ..cube.repair import CHANCE_DISTANCE
+from .validity import HALF_LIFE
 from ..cube.witness import invert
 from .taxonomy import Verdict
 
@@ -51,7 +52,10 @@ _HEAT_INK_DARK = ["#c3c2b7"] * 7 + ["#0b0b0b"] * 4
 
 
 def _pct(x: float | None) -> str:
-    return "–" if x is None else f"{100 * x:.0f}%"
+    """A percentage; small non-zero ones keep a decimal, so they never read as 0%."""
+    if x is None:
+        return "–"
+    return f"{100 * x:.1f}%" if 0 < x < 0.095 else f"{100 * x:.0f}%"
 
 
 def _ranked(scores: dict[str, Any]) -> list[str]:
@@ -154,7 +158,8 @@ def _check_strip(checks: dict[str, str] | None) -> str:
             f'<rect x="{i * 13}" y="0" width="11" height="11" rx="2" style="fill:var({token})">'
             f"<title>{i + 1}. {escape(c.title)}: {label}</title></rect>"
         )
-    return f'<svg class="checks" width="{len(CHECKS) * 13}" height="11">{"".join(cells)}</svg>'
+    # Scales down with a narrow card instead of being cut off at its edge.
+    return f'<svg class="checks" viewBox="0 0 {len(CHECKS) * 13 - 2} 11">{"".join(cells)}</svg>'
 
 
 def _legend(items: list[tuple[str, str]]) -> str:
@@ -207,7 +212,18 @@ svg.marks polygon { fill: transparent; stroke-linejoin: round; vector-effect: no
 svg.marks .halo { stroke: rgba(0,0,0,.75); stroke-width: 5; }
 svg.marks .line { stroke: var(--mark); stroke-width: 2.5; }
 svg.marks g:hover .line { stroke-width: 4; }
-#show-marks:not(:checked) ~ .gallery svg.marks { display: none; }
+#show-marks:not(:checked) ~ * svg.marks { display: none; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 8px 0 12px; color: var(--ink-2);
+  font-size: 13px; }
+.controls select, .controls button { font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
+.controls button:disabled { color: var(--muted); }
+.controls .count { color: var(--muted); }
+.pager { display: flex; gap: 8px; align-items: center; justify-content: center; margin: 12px 0; color: var(--ink-2); }
+.pager button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 10px; }
+.pager button:disabled { color: var(--muted); }
+.hall { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
 .sample ul.marks { margin: 4px 0 0; padding-left: 16px; color: var(--ink); }
 .sample .repairs { margin-top: 4px; color: var(--ink); }
 .sample details.solution { margin-top: 4px; color: var(--ink); }
@@ -218,7 +234,7 @@ svg.marks g:hover .line { stroke-width: 4; }
   font-size: 13px; }
 .sample .head > :first-child { min-width: 0; }
 .sample .head > :last-child { flex-shrink: 0; white-space: nowrap; }
-.sample svg.checks { display: block; margin: 6px 0; }
+.sample svg.checks { display: block; margin: 6px 0; width: 100%; max-width: 219px; height: auto; }
 .sample .flags { margin-top: 4px; word-break: break-word; }
 .noimg { aspect-ratio: 1; display: grid; place-items: center; color: var(--muted); background: var(--grid); }
 a { color: var(--series); }
@@ -282,12 +298,13 @@ def _scores_section(scores: dict[str, Any]) -> str:
     return (
         "<h2>Scores</h2><p><b>Validity</b> says how close an image comes to a valid, scrambled, standard 3x3 "
         "cube: the fewest stickers you would have to recolor to get one (plus any sticker no recoloring fixes, "
-        "such as one with letters or two colors), compared with random colors. 100% is a valid cube, 0% is no "
-        "better than coloring the stickers at random (which needs about "
+        "such as one with letters or two colors). 100% is a valid cube, and every "
+        f"{HALF_LIFE:.1f} stickers to fix halve the score, so a cube that still fools someone never reaches 0%. "
+        "Coloring the stickers at random lands at 25% (it needs about "
         f"{CHANCE_DISTANCE:.1f} recolorings, because the three hidden faces leave a lot of freedom). A barely "
         "scrambled cube or a designed pattern is held in slightly less regard: its validity is multiplied by a "
-        "scramble factor between 80% and 100%. An image that is not read as a 3x3 cube, or is not scrambled at "
-        "all, scores 0%.</p>"
+        "scramble factor between 95% and 100%. 0% is for images that fool no one: not read as a 3x3 cube, not "
+        "scrambled at all, or with a flaw anyone sees at a glance.</p>"
         "<p><b>Who it fools</b> says who would be taken in by each image: every failed check is one that "
         f"{escape(NOTICED_BY[0])}, {escape(NOTICED_BY[1])}, {escape(NOTICED_BY[2])} or {escape(NOTICED_BY[3])} "
         "would notice, and an image fools everyone below the first who notices. An image that passes every "
@@ -404,11 +421,17 @@ def _fools(level: int | None) -> str:
 
 
 def _repairs(validity: dict[str, Any] | None) -> str:
-    """One line on how far the image is from a valid cube, e.g. "2 stickers to fix: U5 R→G, F3 B→G"."""
+    """How far the image is from a valid cube, e.g. "2 stickers to fix: U5 R→G, F3 B→G", after the
+    reason for a 0% when there is one."""
     if not validity:
         return ""
+    reason = f"<div class='repairs'>{escape(validity['reason'])}</div>" if validity.get("reason") else ""
     if "repairs" not in validity:
-        return f"<div class='repairs'>{escape(validity['reason'])}</div>"
+        return reason
+    return reason + _fixes(validity)
+
+
+def _fixes(validity: dict[str, Any]) -> str:
     parts = [f"{f['facelet']} {f['seen']}→{f['color']}" for f in validity["fixes"]]
     parts += [f"{name} (sticker defect)" for name in validity["defective"]]
     count = len(parts)
@@ -446,44 +469,151 @@ def _marks_svg(s: dict[str, Any]) -> str:
             f"{''.join(groups)}</svg>")
 
 
+def _card(s: dict[str, Any], attributes: str = "", deferred: bool = False) -> str:
+    """One sample's card. A ``deferred`` image only loads once the gallery script shows its card
+    (browsers fetch lazy images even in hidden cards)."""
+    if s["image_path"]:
+        src = escape(s["image_path"])
+        source = f"data-src='{src}'" if deferred else f"src='{src}'"
+        image = (f"<a class='frame' href='{src}'><img loading='lazy' {source} alt='{escape(s['sample_id'])}'>"
+                 f"{_marks_svg(s)}</a>")
+    else:
+        image = f"<div class='noimg'>{escape(s.get('error') or 'no image')}</div>"
+    if s.get("reference"):
+        seed = "real photo"
+    else:
+        seed = f"seed {escape(str(s['seed']))}" if s["seed_supported"] else "unseeded"
+    if s.get("backfilled"):
+        seed += " · <span title='Generated after the run, when the original request failed'>backfilled</span>"
+    overlay = f" · <a href='{escape(s['overlay_path'])}'>extraction</a>" if s.get("overlay_path") else ""
+    points = "–" if s["points"] is None else f"{s['points']:g}/{MAX_POINTS:.0f}"
+    validity = s.get("validity")
+    headline = points if validity is None else f"{_pct(validity['score'])} · {points}"
+    flags = ", ".join(escape(f) for f in s["flags"]) or "–"
+    problems = "".join(f"<li>{_text(m['label'])}</li>" for m in s.get("marks") or [])
+    problems = f"<ul class='marks'>{problems}</ul>" if problems else ""
+    return (
+        f"<div class='sample'{attributes}>{image}<div class='body'><div class='head'><span>{escape(s['model_name'])} "
+        f"#{s['iteration']}</span><span>{headline}</span></div>{_check_strip(s.get('checks'))}"
+        f"<div>{escape(s['verdict'])} · {seed}{overlay}</div>{_fools(s.get('fools'))}{_repairs(validity)}"
+        f"{_solution_html(s.get('solution'))}{problems}"
+        f"<div class='flags muted'>{flags}</div></div></div>"
+    )
+
+
+HALL_SIZE = 8
+
+
+def _hall(ordered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The first images of ``ordered``, at most one per model."""
+    picked: dict[str, dict[str, Any]] = {}
+    for s in ordered:
+        if s["model_name"] not in picked:
+            picked[s["model_name"]] = s
+            if len(picked) == HALL_SIZE:
+                break
+    return list(picked.values())
+
+
+def _hall_section(samples: list[dict[str, Any]], scores: dict[str, Any]) -> str:
+    """The best and worst generated images, one per model; reference photos are left out. Shame only
+    takes images read as invalid: an inconclusive image may be the reader's failure, not the model's."""
+    generated = [s for s in _gallery_order(samples, scores) if not s.get("reference") and s["image_path"]]
+    fame = _hall(generated)
+    shame = _hall([s for s in reversed(generated) if s["verdict"] == Verdict.INVALID])
+    return (
+        "<h2>Hall of Fame</h2><p>The most valid generated images, one per model (real photos left out).</p>"
+        # Before every gallery, so it can hide their outlines (see the CSS).
+        "<input type='checkbox' id='show-marks' checked> <label for='show-marks'>Show problem outlines</label>"
+        f"<div class='gallery hall'>{''.join(_card(s) for s in fame)}</div>"
+        "<h2>Hall of Shame</h2><p>The least valid images, one per model. Only images read as invalid "
+        "count: an inconclusive one may be our reader's failure rather than the model's.</p>"
+        f"<div class='gallery hall'>{''.join(_card(s) for s in shame)}</div>"
+    )
+
+
+GALLERY_SCRIPT = """
+(() => {
+  const gallery = document.getElementById('gallery'), form = document.getElementById('gallery-controls');
+  const pager = document.getElementById('pager'), count = document.getElementById('gallery-count');
+  const cards = [...gallery.children];  // in quality order: most valid first
+  let page = 0;
+  function render() {
+    const per = +form.per.value, model = form.model.value, verdict = form.verdict.value, size = +form.size.value;
+    const seen = {};
+    let shown = cards.filter(c => (!model || c.dataset.model === model) && (!verdict || c.dataset.verdict === verdict))
+      .filter(c => { seen[c.dataset.model] = (seen[c.dataset.model] || 0) + 1; return !per || seen[c.dataset.model] <= per; });
+    if (form.sort.value === 'rank') {
+      const pos = new Map(shown.map((c, i) => [c, i]));
+      shown.sort((a, b) => a.dataset.rank - b.dataset.rank || pos.get(a) - pos.get(b));
+    }
+    const pages = Math.max(1, Math.ceil(shown.length / size));
+    page = Math.min(page, pages - 1);
+    const visible = new Set(shown.slice(page * size, (page + 1) * size));
+    cards.forEach(c => {
+      c.hidden = !visible.has(c);
+      const img = c.querySelector('img[data-src]');
+      if (img && !c.hidden) { img.src = img.dataset.src; img.removeAttribute('data-src'); }
+    });
+    shown.forEach(c => gallery.appendChild(c));
+    count.textContent = shown.length + (shown.length === 1 ? ' image' : ' images');
+    pager.querySelector('span').textContent = 'page ' + (page + 1) + ' of ' + pages;
+    pager.querySelector('[data-step="-1"]').disabled = page === 0;
+    pager.querySelector('[data-step="1"]').disabled = page >= pages - 1;
+    pager.hidden = pages === 1;
+  }
+  form.addEventListener('change', () => { page = 0; render(); });
+  pager.addEventListener('click', e => {
+    const step = e.target.dataset && +e.target.dataset.step;
+    if (step) { page += step; render(); gallery.scrollIntoView({behavior: 'smooth'}); }
+  });
+  render();
+})();
+"""
+PAGE_SIZE = 24
+
+
 def _samples_section(samples: list[dict[str, Any]], scores: dict[str, Any]) -> str:
-    cards = []
-    for s in _gallery_order(samples, scores):
-        if s["image_path"]:
-            src = escape(s["image_path"])
-            image = (f"<a class='frame' href='{src}'><img loading='lazy' src='{src}' alt='{escape(s['sample_id'])}'>"
-                     f"{_marks_svg(s)}</a>")
-        else:
-            image = f"<div class='noimg'>{escape(s.get('error') or 'no image')}</div>"
-        if s.get("reference"):
-            seed = "real photo"
-        else:
-            seed = f"seed {escape(str(s['seed']))}" if s["seed_supported"] else "unseeded"
-        if s.get("backfilled"):
-            seed += " · <span title='Generated after the run, when the original request failed'>backfilled</span>"
-        overlay = f" · <a href='{escape(s['overlay_path'])}'>extraction</a>" if s.get("overlay_path") else ""
-        points = "–" if s["points"] is None else f"{s['points']:g}/{MAX_POINTS:.0f}"
-        validity = s.get("validity")
-        headline = points if validity is None else f"{_pct(validity['score'])} · {points}"
-        flags = ", ".join(escape(f) for f in s["flags"]) or "–"
-        problems = "".join(f"<li>{_text(m['label'])}</li>" for m in s.get("marks") or [])
-        problems = f"<ul class='marks'>{problems}</ul>" if problems else ""
-        cards.append(
-            f"<div class='sample'>{image}<div class='body'><div class='head'><span>{escape(s['model_name'])} "
-            f"#{s['iteration']}</span><span>{headline}</span></div>{_check_strip(s.get('checks'))}"
-            f"<div>{escape(s['verdict'])} · {seed}{overlay}</div>{_fools(s.get('fools'))}{_repairs(validity)}"
-            f"{_solution_html(s.get('solution'))}{problems}"
-            f"<div class='flags muted'>{flags}</div></div></div>"
-        )
+    ordered = _gallery_order(samples, scores)
+    rank = {model: i for i, model in enumerate(_ranked(scores))}
+    # Without the script the page shows the default view: each model's best image, by leaderboard.
+    best = {model: next(s for s in ordered if s["model_name"] == model) for model in rank if
+            any(s["model_name"] == model for s in ordered)}
+    default = set(map(id, sorted(best.values(), key=lambda s: rank[s["model_name"]])[:PAGE_SIZE]))
+    cards = [
+        _card(s, f" data-model='{escape(s['model_name'])}' data-verdict='{escape(s['verdict'])}' "
+                 f"data-rank='{rank.get(s['model_name'], len(rank))}'" + ("" if id(s) in default else " hidden"),
+              deferred=id(s) not in default)
+        for s in ordered
+    ]
+    models = "".join(f"<option value='{escape(m)}'>{escape(m)}</option>" for m in best)
+    verdicts = "".join(f"<option value='{escape(v)}'>{escape(label)}</option>" for v, label, _ in OUTCOMES
+                       if any(s["verdict"] == v for s in samples))
+    controls = (
+        "<form class='controls' id='gallery-controls' onsubmit='return false'>"
+        "<label>Show <select name='per'><option value='1' selected>the best image</option>"
+        "<option value='3'>the best 3</option><option value='5'>the best 5</option>"
+        "<option value='0'>every image</option></select> per model</label>"
+        f"<label>Model <select name='model'><option value=''>all models</option>{models}</select></label>"
+        f"<label>Verdict <select name='verdict'><option value=''>any</option>{verdicts}</select></label>"
+        "<label>Order <select name='sort'><option value='rank' selected>leaderboard</option>"
+        "<option value='quality'>most valid first</option></select></label>"
+        f"<label>Per page <select name='size'><option>12</option><option selected>{PAGE_SIZE}</option>"
+        "<option>48</option><option>96</option></select></label>"
+        "<span class='count' id='gallery-count'></span></form>"
+    )
+    pager = ("<div class='pager' id='pager' hidden><button type='button' data-step='-1'>← Previous</button>"
+             "<span></span><button type='button' data-step='1'>Next →</button></div>")
     legend = _legend([(label, token) for label, token in CHECK_RESULTS.values()] + [("problem outline", "--mark")])
     return (
-        f"<h2>Samples</h2><p>Every attempted image, most valid first. Each card shows its validity and rubric "
+        f"<h2>Samples</h2><p>Each model's best image by default; show more per model, filter, or page through "
+        "every attempted image below. Each card shows its validity and rubric "
         "points, and which stickers to recolor for the nearest valid cube. The squares are the "
         f"{len(CHECKS)} checks in order; hover for names. Where a failed check has a clear culprit (a duplicate center, an impossible piece, a "
         "face that is not 3x3, ...) it is outlined on the image and listed below it. Twist, flip and parity "
         "failures belong to the whole cube, so they are not outlined.</p>"
-        "<input type='checkbox' id='show-marks' checked> <label for='show-marks'>Show problem outlines</label>"
-        f"{legend}<div class='gallery'>{''.join(cards)}</div>"
+        f"{controls}{legend}<div class='gallery' id='gallery'>{''.join(cards)}</div>{pager}"
+        f"<script>{GALLERY_SCRIPT}</script>"
     )
 
 
@@ -508,7 +638,7 @@ def render_html(stamp: str, run: dict[str, Any], scores: dict[str, Any], samples
         f"<h1>Rubik's Cube benchmark results</h1>{meta}"
         f"<p class='meta'>Made with <a href='{REPOSITORY}'>RubiksBench</a> {__version__}: the benchmark's code, "
         "method and how to run it.</p>"
-        + _scores_section(scores) + _heatmap_section(scores) + _samples_section(samples, scores)
+        + _scores_section(scores) + _heatmap_section(scores) + _hall_section(samples, scores) + _samples_section(samples, scores)
         + _details_section(scores) + _checks_section()
         + "</main></body></html>\n"
     )

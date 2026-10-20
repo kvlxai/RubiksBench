@@ -45,26 +45,29 @@ or uncertain extraction is reported as `INCONCLUSIVE`; a missing file exits with
 Validity says how close an image comes to a valid, scrambled, standard 3×3 cube, from 0% to 100%:
 
 ```
-validity = (1 − (repairs + defects) / chance) × scramble factor        (clipped to 0–100%)
+validity = 0.5 ^ ((repairs + defects) / half-life) × scramble factor,      half-life = chance / 2 ≈ 2.2
 ```
 
 - **repairs** is the fewest visible stickers you would have to recolor to get a valid standard cube.
   It's exact: a dynamic program over every corner and edge slot, for each of the 24 orientations of the
   standard colors, keeping only reachable states (each piece once, twist, flip and parity). Hidden
   stickers are free, and the report lists which stickers to recolor.
-- **defects** are stickers no recoloring fixes: letters, two colors on one sticker, or a second shade
-  of a color.
+- **defects** are stickers no recoloring fixes: letters, two colors on one sticker, a second shade
+  of a color, or a cubie out of place.
 - **chance** is the average repair distance of random colors on the 27 visible stickers: 4.45. The
   three hidden faces leave so much freedom that random stickers are only about four recolorings from a
-  valid cube. So 0% means "no better than random", not "everything wrong".
-
+  valid cube.
+- **half-life**: every 2.2 stickers to fix halve the score. So 1 fix gives 73%, 2 give 54%, 4 give 29%,
+  random colors 25% and 8 fixes 8%. A cube with many mistakes still ranks above one with even more,
+  and never reaches 0% while it can fool someone.
 - **scramble factor** holds a barely scrambled cube or a designed pattern in slightly less regard. It
-  is 100% for a cube that looks like a random scramble, sliding down to 80% as fewer stickers differ
+  is 100% for a cube that looks like a random scramble, sliding down to 95% as fewer stickers differ
   from their face's center or more faces show a symmetric pattern (see the "scrambled" check below).
 
-A valid, randomly scrambled cube scores 100%, and each sticker to fix costs about 22 points. An image
-that isn't read as a 3×3 cube, or isn't scrambled at all (every face one color), scores 0%. Every
-mistake costs only the stickers it takes to fix it, so nothing is counted twice. Each model's score is
+0% is kept for images that fool no one: an image that isn't read as a 3×3 cube (the prompt asks for
+one), one that isn't scrambled at all (every face one color), or one with a flaw anyone sees at a
+glance, such as letters on the stickers or a seventh color. Their stickers to fix are still listed.
+Every mistake costs only the stickers it takes to fix it, so nothing is counted twice. Each model's score is
 the mean over its images, with a 95% CI. The models are ranked by it, and the gallery is sorted by it.
 
 ### Rubric (what is wrong)
@@ -201,15 +204,24 @@ carry `reused_from` in the run's `generations.jsonl`, and their images are copie
 a run directory stays self-contained. `library import` adds the images of runs made before the
 library existed (as copies; the run is left as it is).
 
+Scores are cached too, in `library/evaluations/`. An image that was already scored is not read again,
+as long as nothing that decides its result has changed: the same image (by content), the same evaluator
+version, the same scoring code (a fingerprint of the vision, cube and evaluation code, so an edit
+without a version bump is never served stale scores) and the same reader setup (with or without CLIP).
+Re-running a benchmark then only scores new images. `run` and `score` take `--no-cache` to score
+everything again. Hand annotations are never cached.
+
 `backfill configs/benchmark.toml` only fills the library: for each model it requests the images
 still missing up to `iterations` (with fixed seeds, the missing seeds), once each, without scoring.
 Failed requests are logged and requested again by the next `backfill`. A `run` afterwards then only
 scores. A `run` without a backfill generates the missing images itself, and counts failures as
 generation failures in its report.
 
-Models run one after another, one request at a time, and each image is scored as soon as it is
-generated or taken from the library (the verdict is printed on its log line). Ctrl-C stops the run and still reports what was
-generated so far. Each run directory holds `run.json`,
+Up to `concurrency` models (default 8) are generated at the same time, but each model's own requests
+go one at a time, so its latency never includes queueing behind itself. Once every image is in, they are
+scored one by one, with a progress line each. Scoring is local CPU work, and running it between
+requests would stall them and inflate their measured latency. Ctrl-C stops the run, then scores and
+reports what was generated so far. Each run directory holds `run.json`,
 `generations.jsonl` (every attempt, including failures, with seed and the exact request),
 `images/` and `evaluations.jsonl`. Every scoring pass (at the end of `run`, or via `score`) also writes
 timestamped results:
@@ -217,7 +229,11 @@ timestamped results:
 - `results-<UTC>.html` is a self-contained report with light and dark themes. It has:
   - the per-model scores: mean validity with an inline 95% CI strip, the rubric score and an outcome bar;
   - a points-per-check heatmap;
-  - a gallery of every image, most valid first, with the stickers to fix (or, for a valid cube, a
+  - a Hall of Fame and a Hall of Shame: the most and least valid generated images, one per model
+    (reference photos left out; Shame only counts images read as invalid, never inconclusive ones);
+  - a gallery showing each model's best image, with options to show the best 3, 5 or every image per
+    model, filter by model or verdict, order by leaderboard or validity, and page through. Only the
+    images on screen are loaded. Each card has the stickers to fix (or, for a valid cube, a
     solution and a link to view it in 3D), its per-check results, its extraction overlay and the culprits of
     failed checks outlined on the image (hover an outline to see why; a checkbox hides them);
   - the failure flags and the list of checks.

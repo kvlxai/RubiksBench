@@ -29,6 +29,23 @@ def supported_sizes(message: str) -> list[tuple[int, int]]:
     return [(int(w), int(h)) for w, h in re.findall(r"'(\d+)x(\d+)'", message)]
 
 
+def pixel_range(message: str) -> tuple[int, int] | None:
+    """The allowed pixel count in a Runware "Total pixels ... must be between A and B" message."""
+    match = re.search(r"pixels.*?between (\d+) and (\d+)", message, re.IGNORECASE)
+    return (int(match[1]), int(match[2])) if match else None
+
+
+def scaled_size(width: int, height: int, low: int, high: int) -> tuple[int, int]:
+    """The size of the same shape, in steps of 64 pixels, whose pixel count lies strictly between low and high."""
+    factor = math.sqrt((low if width * height <= low else high) / (width * height))
+    w, h = (max(64, round(width * factor / 64) * 64), max(64, round(height * factor / 64) * 64))
+    while w * h <= low:
+        w, h = w + 64, round((w + 64) * height / width / 64) * 64
+    while w * h >= high:
+        w, h = w - 64, round((w - 64) * height / width / 64) * 64
+    return w, h
+
+
 def closest_size(width: int, height: int, supported: list[tuple[int, int]]) -> tuple[int, int]:
     """The supported size nearest in shape (aspect ratio), then in area."""
     aspect = width / height
@@ -96,12 +113,12 @@ class RunwareBackend(ImageBackend):
         try:
             # A rejected seed or size is a validation error before any image exists, so
             # resending with the field adapted is not a regeneration; it is recorded.
-            for attempt in range(3):
+            for attempt in range(4):
                 try:
                     items = await self._client.run(payload)
                     break
                 except RunwareError as exc:
-                    if attempt == 2 or not self._adapt(exc, request.model, payload, result):
+                    if attempt == 3 or not self._adapt(exc, request.model, payload, result):
                         raise
             item = dict(items[0])
             if data := item.pop("imageBase64Data", None):
@@ -131,14 +148,20 @@ class RunwareBackend(ImageBackend):
             self._seedless.add(model)
             self._drop_seed(payload, result)
             return True
-        if exc.parameter == "width/height" and (supported := supported_sizes(exc.message)):
-            size = closest_size(payload["width"], payload["height"], supported)
-            if size == (payload["width"], payload["height"]):
-                return False
-            self._sizes[model] = size
-            self._resize(payload, result, size)
-            return True
-        return False
+        # Size errors name "width/height", "width" or "height" depending on the model, so they
+        # are recognised by their message: a list of sizes, or a range of pixel counts.
+        current = (payload["width"], payload["height"])
+        if supported := supported_sizes(exc.message):
+            size = closest_size(*current, supported)
+        elif limits := pixel_range(exc.message):
+            size = scaled_size(*current, *limits)
+        else:
+            return False
+        if size == current:
+            return False
+        self._sizes[model] = size
+        self._resize(payload, result, size)
+        return True
 
     @staticmethod
     def _drop_seed(payload: dict[str, Any], result: GenerationResult) -> None:

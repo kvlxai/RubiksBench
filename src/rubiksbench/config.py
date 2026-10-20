@@ -72,6 +72,8 @@ class BenchmarkConfig:
     models_file: str = "models.toml"
     # Directory of generated images that runs reuse (see storage/library.py).
     library: str = "library"
+    # Models generated at the same time; each model's own requests stay one after another.
+    concurrency: int = 8
 
     @classmethod
     def load(cls, path: Path) -> "BenchmarkConfig":
@@ -89,6 +91,8 @@ class BenchmarkConfig:
             raise ValueError(f"{path}: extractor must be one of {sorted(EXTRACTORS)}")
         if data.get("iterations", 1) < 1:
             raise ValueError(f"{path}: iterations must be at least 1")
+        if data.get("concurrency", 1) < 1:
+            raise ValueError(f"{path}: concurrency must be at least 1")
         catalogue = load_models(path.parent / data.get("models_file", cls.models_file))
         data["models"] = select_models(path, selection, catalogue)
         return cls(**data)

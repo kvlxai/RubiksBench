@@ -6,6 +6,7 @@ how sure it is, and the evaluator turns that into a verdict.
 """
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,13 @@ class VisionExtractor:
         use_clip = recognizer.available() if recognize is None else recognize
         self.recognizer = recognizer.CubeRecognizer() if use_clip else None
 
+    @property
+    def cache_variant(self) -> str:
+        """What, besides the code, decides this extractor's readings (see storage/evaluation_cache)."""
+        clip = f"clip_{self.recognizer.model_id}" if self.recognizer else "silhouette"
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", f"vision-{clip}-{'fit' if self.fit_model else 'nofit'}"
+                      f"{'' if self.write_overlay else '-nooverlay'}")
+
     def _recognize(self, image_path: Path) -> tuple[str | None, dict[str, Any]]:
         if self.recognizer is None:
             return None, {"method": "silhouette"}
@@ -185,7 +193,9 @@ class VisionExtractor:
             grids[face] = (3, 3) if inferred else (grid.columns, grid.rows)
             for count, dominance in ((grid.columns, grid.column_dominance), (grid.rows, grid.row_dominance)):
                 if count != 3 and not inferred:
-                    strong = dominance >= self.min_grid_dominance
+                    # Rows are only counted on faces cut from a clean outline: a turned layer or a
+                    # background the cut-out mistook for cube skews the faces, and their counts with them.
+                    strong = dominance >= self.min_grid_dominance and quality["shape"] == PASS
                     flags.append(Flag.WRONG_GRID_SIZE if strong else Flag.VISION_LOW_CONFIDENCE)
                     if quality["grid"] != FAIL:
                         quality["grid"] = FAIL if strong else INCONCLUSIVE
@@ -225,18 +235,15 @@ class VisionExtractor:
                        if f"{face}{i + 1}" not in misplaced],
             misplaced := [name for name in misplaced if name[0] in read and grids[name[0]] == (3, 3)],
         )
-        if misplaced:
-            flags.append(Flag.CUBIES_OUT_OF_PLACE)
-            quality["in_place"] = FAIL
-        if shades:
-            flags.append(Flag.OFF_SHADE_STICKERS)
-            quality["shades"] = FAIL
-        if split:
-            flags.append(Flag.SPLIT_STICKERS)
-            quality["single_color"] = FAIL
-        if marked >= self.min_marked_stickers:
-            flags.append(Flag.MARKED_STICKERS)
-            quality["stickers"] = FAIL
+        # Defects measured on faces cut from a skewed outline are as unreliable as their grid counts.
+        trusted = quality["shape"] == PASS
+        for found, flag, check in ((misplaced, Flag.CUBIES_OUT_OF_PLACE, "in_place"),
+                                   (shades, Flag.OFF_SHADE_STICKERS, "shades"),
+                                   (split, Flag.SPLIT_STICKERS, "single_color"),
+                                   (marked >= self.min_marked_stickers, Flag.MARKED_STICKERS, "stickers")):
+            if found:
+                flags.append(flag if trusted else Flag.VISION_LOW_CONFIDENCE)
+                quality[check] = FAIL if trusted else INCONCLUSIVE
         known = {9 * FACES.index(face) + i: c for face, face_colors in colors.items()
                  for i, c in enumerate(face_colors) if faces[face][i] != "."}
         min_margin = min(c.margin for c in known.values())

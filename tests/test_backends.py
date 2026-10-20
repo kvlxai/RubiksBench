@@ -7,7 +7,7 @@ from runware import create_runware_error
 
 from rubiksbench.backends import GenerationRequest, get_backend
 from rubiksbench.backends.fal import map_arguments
-from rubiksbench.backends.runware import closest_size, supported_sizes
+from rubiksbench.backends.runware import closest_size, pixel_range, scaled_size, supported_sizes
 from rubiksbench.storage.results import RunStore
 
 
@@ -190,10 +190,12 @@ IDEOGRAM_SIZES = (
 
 
 class SizeRejectingClient(FakeClient):
+    parameter = "width/height"
+
     async def run(self, payload):
         self.payloads.append(dict(payload))
         if (payload["width"], payload["height"]) != (2048, 2048):
-            raise create_runware_error("invalidParameter", IDEOGRAM_SIZES, parameter="width/height")
+            raise create_runware_error("invalidParameter", IDEOGRAM_SIZES, parameter=self.parameter)
         return self.response
 
 
@@ -215,3 +217,35 @@ def test_runware_resizes_for_models_with_fixed_sizes():
         assert result.ok and result.adjustments["size"] == {"requested": [1024, 1024], "used": [2048, 2048]}
     # One rejected attempt and a resend, then the supported size is used up front.
     assert [(p["width"], p["height"]) for p in client.payloads] == [(1024, 1024), (2048, 2048), (2048, 2048)]
+
+
+def test_runware_adapts_size_errors_whatever_parameter_they_name():
+    client = SizeRejectingClient([{"imageBase64Data": base64.b64encode(b"X").decode()}])
+    client.parameter = "width"  # Luma UNI-1 names only "width"
+    backend = get_backend("runware", api_key="test")
+    backend._client = client
+    result = asyncio.run(backend.generate(GenerationRequest(model="luma:uni@1", prompt="p", seed=3)))
+    assert result.ok and result.adjustments["size"]["used"] == [2048, 2048]
+
+
+SEEDREAM_LITE_PIXELS = "Invalid image pixels. Total pixels (width x height) must be between 3686400 and 10404496."
+
+
+def test_runware_scales_to_a_pixel_range():
+    assert pixel_range(SEEDREAM_LITE_PIXELS) == (3686400, 10404496)
+    for size in [(1024, 1024), (1024, 1536), (8192, 8192)]:
+        w, h = scaled_size(*size, 3686400, 10404496)
+        assert 3686400 < w * h < 10404496 and w % 64 == h % 64 == 0
+        assert abs(w / h - size[0] / size[1]) < 0.05  # same shape
+
+    class PixelRejectingClient(FakeClient):
+        async def run(self, payload):
+            self.payloads.append(dict(payload))
+            if not 3686400 < payload["width"] * payload["height"] < 10404496:
+                raise create_runware_error("invalidParameter", SEEDREAM_LITE_PIXELS, parameter="width")
+            return self.response
+
+    backend = get_backend("runware", api_key="test")
+    backend._client = PixelRejectingClient([{"imageBase64Data": base64.b64encode(b"X").decode()}])
+    result = asyncio.run(backend.generate(GenerationRequest(model="bytedance:seedream@5.0-lite", prompt="p", seed=3)))
+    assert result.ok and result.adjustments["size"]["requested"] == [1024, 1024]

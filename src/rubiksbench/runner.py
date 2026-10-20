@@ -1,5 +1,6 @@
 """Run a benchmark: take images from the library or generate them serially, evaluate each, score per model."""
 
+import asyncio
 import random
 import re
 import shutil
@@ -8,15 +9,17 @@ import time
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from . import EVALUATOR_VERSION, __version__
 from .backends import ImageBackend, get_backend
 from .backends.base import utc_now
-from .config import BenchmarkConfig
+from .config import BenchmarkConfig, ModelConfig
 from .evaluation.evaluator import evaluate_extraction
 from .evaluation.report import write_results
 from .evaluation.scoring import score_run
+from .storage.evaluation_cache import EvaluationCache
 from .storage.library import ImageLibrary
 from .storage.results import RunStore
 from .vision.extractor import Extractor
@@ -43,11 +46,25 @@ class _Backends:
     def __init__(self, stack: AsyncExitStack):
         self._stack = stack
         self._open: dict[str, ImageBackend] = {}
+        self._lock = asyncio.Lock()  # models running side by side share one backend per provider
 
     async def get(self, name: str) -> ImageBackend:
-        if name not in self._open:
-            self._open[name] = await self._stack.enter_async_context(get_backend(name))
+        async with self._lock:
+            if name not in self._open:
+                self._open[name] = await self._stack.enter_async_context(get_backend(name))
         return self._open[name]
+
+
+async def _per_model(config: BenchmarkConfig, work: Callable[[str, ModelConfig], Awaitable[None]]) -> None:
+    """Run ``work`` for every model, up to ``config.concurrency`` models at a time. A model's own
+    requests stay one after another, so its latency never includes waiting behind itself."""
+    slots = asyncio.Semaphore(config.concurrency)
+
+    async def one(name: str, model: ModelConfig) -> None:
+        async with slots:
+            await work(name, model)
+
+    await asyncio.gather(*(one(name, model) for name, model in config.models.items()))
 
 
 def _reusable(pool: list[dict[str, Any]], seed: int, fixed_seed: bool) -> dict[str, Any] | None:
@@ -58,10 +75,15 @@ def _reusable(pool: list[dict[str, Any]], seed: int, fixed_seed: bool) -> dict[s
     return None
 
 
-async def generate_run(config: BenchmarkConfig, store: RunStore, extractor: Extractor, library: ImageLibrary) -> None:
-    """Fill every model's samples from the image library, generating (serially) only what is missing.
+async def generate_run(
+    config: BenchmarkConfig, store: RunStore, extractor: Extractor, library: ImageLibrary,
+    cache: EvaluationCache | None = None,
+) -> None:
+    """Fill every model's samples from the image library, generating only what is missing, then score them.
 
-    Every new image goes into the library too, for later runs with the same settings.
+    Models are generated side by side (see ``_per_model``); every new image also goes into the
+    library. Scoring waits until all images are in: it is local CPU work, and running it between
+    requests would stall them and inflate their measured latency.
     """
     store.write_config(
         {
@@ -73,29 +95,30 @@ async def generate_run(config: BenchmarkConfig, store: RunStore, extractor: Extr
     )
     async with AsyncExitStack() as stack:
         backends = _Backends(stack)
-        for name, model in config.models.items():
+
+        async def fill(name: str, model: ModelConfig) -> None:
             first = config.first_seed(model)
             pool = library.images(model.backend, config.request(model))
             for index, seed in enumerate(_seeds(first, config.iterations)):
                 sample_id = f"{_slug(name)}__{index:04d}"
                 fields = {"model_name": name, "iteration": index}
                 if (found := _reusable(pool, seed, first is not None)) is not None:
-                    record = store.add_image(sample_id, found, library.root / found["image_path"], **fields,
-                                             reused_from=found["image_path"])
-                    status = format_status(evaluate_sample(store, record, extractor))
-                    _log(f"[{name}] {index + 1}/{config.iterations} seed={found['request']['seed']} "
-                         f"from the library {status}")
+                    store.add_image(sample_id, found, library.root / found["image_path"], **fields,
+                                    reused_from=found["image_path"])
                     continue
                 backend = await backends.get(model.backend)
                 result = await backend.generate(config.request(model, seed))
                 if result.ok:
                     record = library.add(result)
-                    record = store.add_image(sample_id, record, library.root / record["image_path"], **fields)
-                    status = format_status(evaluate_sample(store, record, extractor))
+                    store.add_image(sample_id, record, library.root / record["image_path"], **fields)
+                    status = "generated"
                 else:
                     store.add_generation(sample_id, result, **fields)
                     status = f"GENERATION FAILED {result.error.code}: {result.error.message}"
                 _log(f"[{name}] {index + 1}/{config.iterations} seed={seed} {result.latency_s:.1f}s {status}")
+
+        await _per_model(config, fill)
+    score_unscored(store, extractor, cache)
 
 
 async def backfill(config: BenchmarkConfig, library: ImageLibrary) -> tuple[int, int]:
@@ -105,10 +128,11 @@ async def backfill(config: BenchmarkConfig, library: ImageLibrary) -> tuple[int,
     random seeds. Each missing image is requested once; a failure is logged and
     left for the next backfill. Returns (generated, failed).
     """
-    generated = failed = 0
+    counts = {"generated": 0, "failed": 0}
     async with AsyncExitStack() as stack:
         backends = _Backends(stack)
-        for name, model in config.models.items():
+
+        async def fill(name: str, model: ModelConfig) -> None:
             first = config.first_seed(model)
             stored = library.images(model.backend, config.request(model))
             if first is not None:
@@ -118,18 +142,21 @@ async def backfill(config: BenchmarkConfig, library: ImageLibrary) -> tuple[int,
                 missing = _seeds(None, max(0, config.iterations - len(stored)))
             if not missing:
                 _log(f"[{name}] {len(stored)} images in the library, none missing")
-                continue
+                return
             backend = await backends.get(model.backend)
             for done, seed in enumerate(missing, 1):
                 result = await backend.generate(config.request(model, seed))
                 if result.ok:
                     library.add(result)
-                    generated += 1
+                    counts["generated"] += 1
                     status = "stored"
                 else:
-                    failed += 1
+                    counts["failed"] += 1
                     status = f"GENERATION FAILED {result.error.code}: {result.error.message}"
                 _log(f"[{name}] {done}/{len(missing)} missing, seed={seed} {result.latency_s:.1f}s {status}")
+
+        await _per_model(config, fill)
+    generated, failed = counts["generated"], counts["failed"]
     return generated, failed
 
 
@@ -159,8 +186,15 @@ def _remaining(seconds: float) -> str:
     return f"~{seconds / 60:.0f} min left"
 
 
-def evaluate_sample(store: RunStore, record: dict[str, Any], extractor: Extractor) -> dict[str, Any]:
-    evaluation = evaluate_extraction(extractor.extract(store.root / record["image_path"]))
+def evaluate_sample(
+    store: RunStore, record: dict[str, Any], extractor: Extractor, cache: EvaluationCache | None = None
+) -> dict[str, Any]:
+    image = store.root / record["image_path"]
+    evaluation = cache.get(image, extractor) if cache else None
+    if evaluation is None:
+        evaluation = evaluate_extraction(extractor.extract(image))
+        if cache:
+            cache.put(image, extractor, evaluation)
     store.add_evaluation(record["sample_id"], evaluation)
     return evaluation
 
@@ -169,7 +203,9 @@ REFERENCE_MODEL = "Reference photos (real cubes)"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 
 
-def import_references(store: RunStore, directory: Path, extractor: Extractor, evaluate: bool = True) -> int:
+def import_references(
+    store: RunStore, directory: Path, extractor: Extractor, evaluate: bool = True, cache: EvaluationCache | None = None
+) -> int:
     """Copy real cube photos into the run and score them like generated images.
 
     They are kept apart from the generation log and shown as a calibration row:
@@ -202,7 +238,7 @@ def import_references(store: RunStore, directory: Path, extractor: Extractor, ev
     store.set_references(records)
     if evaluate:
         for record in records:
-            evaluate_sample(store, record, extractor)
+            evaluate_sample(store, record, extractor, cache)
     return len(records)
 
 
@@ -214,7 +250,7 @@ def report_run(store: RunStore) -> tuple[dict[str, Any], dict[str, Path]]:
 
 
 def evaluate_run(
-    store: RunStore, extractor: Extractor, references: Path | None = None
+    store: RunStore, extractor: Extractor, references: Path | None = None, cache: EvaluationCache | None = None
 ) -> tuple[dict[str, Any], dict[str, Path]]:
     """Re-evaluate every image of a run (e.g. with a newer extractor), then report.
 
@@ -224,19 +260,46 @@ def evaluate_run(
     store.clear_evaluations()
     if references is not None:
         import_references(store, references, extractor, evaluate=False)
-    records = [r for r in store.references() + store.generations() if r.get("image_path")]
+    score_records(store, [r for r in store.references() + store.generations() if r.get("image_path")], extractor,
+                  cache)
+    return report_run(store)
+
+
+def score_unscored(store: RunStore, extractor: Extractor, cache: EvaluationCache | None = None) -> None:
+    """Score the run's images that have no evaluation yet (e.g. after an interrupted run)."""
+    scored = store.evaluations()
+    score_records(store, [r for r in store.generations() if r.get("image_path") and r["sample_id"] not in scored],
+                  extractor, cache)
+
+
+def score_records(
+    store: RunStore, records: list[dict[str, Any]], extractor: Extractor, cache: EvaluationCache | None = None
+) -> None:
+    """Score images one by one, with a progress line each and an estimate of the time left.
+    Images the cache has already scored with this evaluator are taken from it first."""
+    if cache:
+        missed = []
+        for record in records:
+            if (evaluation := cache.get(store.root / record["image_path"], extractor)) is not None:
+                store.add_evaluation(record["sample_id"], evaluation)
+            else:
+                missed.append(record)
+        if len(missed) < len(records):
+            _log(f"{len(records) - len(missed)} of {len(records)} images already scored by this evaluator (cache)")
+        records = missed
+    if not records:
+        return
     _log(f"scoring {len(records)} images ({getattr(extractor, 'name', 'extractor')} extractor; "
          "the first one also loads the models, so it takes longer)")
     durations: list[float] = []
     for done, record in enumerate(records, 1):
         begun = time.monotonic()
-        status = format_status(evaluate_sample(store, record, extractor))
+        status = format_status(evaluate_sample(store, record, extractor, cache))
         durations.append(time.monotonic() - begun)
         # The first image includes loading the models, so it is left out of the estimate.
         typical = sum(durations[1:]) / (len(durations) - 1) if len(durations) > 1 else None
         left = f" · {_remaining(typical * (len(records) - done))}" if typical is not None and done < len(records) else ""
         _log(f"[{record['model_name']}] #{record['iteration']}  {done}/{len(records)}  {durations[-1]:.1f}s  {status}{left}")
-    return report_run(store)
 
 
 def new_run_dir(out: Path, config_path: Path) -> Path:

@@ -24,9 +24,11 @@
 # Google, Nano Banana
 "Nano Banana 2.1" = "google:nano-banana@2.1"
 "Nano Banana 2 (Gemini 3.1 Flash Image)" = "google:4@3"
+"Nano Banana Pro" = "google:4@2"
 # OpenAI, GPT-Image
 "GPT-Image-2.5 Sunburst" = "openai:gpt-image@2.5-sunburst"
 "GPT-Image-2.5 Flare" = "openai:gpt-image@2.5-flare"
+"GPT Image 2" = "openai:gpt-image@2"
 # Alibaba, Qwen-Image
 "Qwen-Image-3.0-Pro" = "alibaba:qwen-image@3.0-pro"
 "Qwen-Image-3.0" = "alibaba:qwen-image@3.0"
@@ -36,6 +38,29 @@
 # Ideogram
 "Ideogram 4.5" = "ideogram:4.5@0"
 "Ideogram 4.0" = "ideogram:4@0"
+# Added 2026-10-19 (checked against the catalogue that day)
+# Kuaishou, Kling
+"Kling IMAGE 3.0" = "klingai:kling-image@3"
+"Kling IMAGE O3" = "klingai:kling-image@o3"
+# Recraft
+"Recraft V4.1" = "recraft:v4.1@0"
+"Recraft V4.1 Flash" = "recraft:v4.1@flash"
+# xAI, Grok Imagine
+"Grok Imagine Image 2.0" = "xai:grok-imagine@image-2.0"
+# Krea (Krea 3 is on fal)
+"Krea 2 Large" = "krea:krea@2-large"
+# HiDream (HiDream O1 is on fal)
+"HiDream-I1 Full" = "runware:97@1"
+# Alibaba Tongyi, Z-Image
+"Z-Image" = "runware:z-image@0"
+"Z-Image-Turbo" = "runware:z-image@turbo"
+# Baidu, ERNIE-Image
+"ERNIE-Image" = "baidu:ernie-image@0"
+"ERNIE-Image-Turbo" = "baidu:ernie-image@turbo"
+# Luma (Photon is on fal)
+"Luma UNI-1" = "luma:uni@1"
+# Bria
+"Bria FIBO" = "bria:20@1"
 
 # fal.ai, needs FAL_KEY (or FAL_API_KEY) in .env. Checked 2026-10-17.
 # Endpoints without a seed (FLUX 3 Image, GPT-Image-2.5) run unseeded; the report marks those samples.
@@ -49,6 +74,13 @@
 "Qwen-Image-3.0" = "alibaba/qwen-image-3/text-to-image"
 # Only on fal (checked 2026-10-19). Runs its default prompt expansion (enable_prompt_expansion), 50 steps, cfg 3.
 "MOSS-Image" = "fal-ai/moss-image"
+# Added 2026-10-19; Luma Photon and MiniMax take no seed and run unseeded.
+"Hunyuan Image 3.0" = "fal-ai/hunyuan-image/v3/text-to-image"
+"Krea 3" = "krea/v3/text-to-image"
+"HiDream O1" = "fal-ai/hidream-o1-image"
+"Luma Photon" = "fal-ai/luma-photon"
+"MiniMax image-01" = "fal-ai/minimax/image-01"
+"Stable Diffusion 3.5 Large" = "fal-ai/stable-diffusion-v35-large"
 
 # Hugging Face Inference Providers, needs HF_TOKEN in .env. Checked 2026-10-17.
 # Ids are Hub repo ids; only models a provider serves for text-to-image work.
@@ -57,3 +89,9 @@
 "Qwen-Image" = "Qwen/Qwen-Image"                          # fal-ai, replicate, together, wavespeed
 "FLUX.1 [dev]" = "black-forest-labs/FLUX.1-dev"           # deepinfra, fal-ai, replicate, wavespeed
 "FLUX.1 Krea [dev]" = "black-forest-labs/FLUX.1-Krea-dev" # fal-ai, replicate, wavespeed
+
+# Models that need settings of their own. Tables go last: in TOML, everything after a table header belongs to it.
+[runware."Seedream 5.0 Lite"]
+id = "bytedance:seedream@5.0-lite"
+width = 2048  # needs 3.7 to 10.4 megapixels
+height = 2048

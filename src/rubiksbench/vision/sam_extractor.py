@@ -160,6 +160,11 @@ class SamExtractor:
         self.write_overlay = write_overlay
         self._generator = None
 
+    @property
+    def cache_variant(self) -> str:
+        """What, besides the code, decides this extractor's readings (see storage/evaluation_cache)."""
+        return "sam-" + self.model_id.replace("/", "_") + ("" if self.write_overlay else "-nooverlay")
+
     def _masks(self, image_bgr: np.ndarray) -> list[np.ndarray]:
         if self._generator is None:
             import torch
